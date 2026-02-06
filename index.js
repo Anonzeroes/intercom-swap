@@ -45,6 +45,30 @@ const subnetChannel =
   env.SUBNET_CHANNEL ||
   'trac-peer-subnet';
 
+const dhtBootstrapRaw =
+  (flags['dht-bootstrap'] && String(flags['dht-bootstrap'])) ||
+  env.DHT_BOOTSTRAP ||
+  '';
+const dhtBootstrap = dhtBootstrapRaw
+  ? dhtBootstrapRaw
+      .split(',')
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0)
+  : null;
+if (dhtBootstrap && dhtBootstrap.length === 0) {
+  throw new Error('Invalid DHT bootstrap list (empty).');
+}
+if (dhtBootstrap) {
+  for (const entry of dhtBootstrap) {
+    // hyperdht supports [suggested-ip@]<host>:<port>; we validate the port only.
+    const idx = entry.lastIndexOf(':');
+    const port = idx >= 0 ? Number.parseInt(entry.slice(idx + 1), 10) : NaN;
+    if (idx <= 0 || !Number.isFinite(port) || port <= 0) {
+      throw new Error(`Invalid --dht-bootstrap entry: "${entry}" (expected host:port).`);
+    }
+  }
+}
+
 const sidechannelsRaw =
   (flags['sidechannels'] && String(flags['sidechannels'])) ||
   (flags['sidechannel'] && String(flags['sidechannel'])) ||
@@ -346,6 +370,7 @@ const peerConfig = createPeerConfig(PEER_ENV.MAINNET, {
   storeName: peerStoreNameRaw,
   bootstrap: subnetBootstrap || null,
   channel: subnetChannel,
+  ...(dhtBootstrap ? { dhtBootstrap } : {}),
   enableInteractiveMode: true,
   enableBackgroundTasks: true,
   enableUpdater: true,
