@@ -6,6 +6,7 @@ import { ScBridgeClient } from '../src/sc-bridge/client.js';
 import { createUnsignedEnvelope, attachSignature } from '../src/protocol/signedMessage.js';
 import { validateSwapEnvelope } from '../src/swap/schema.js';
 import { KIND, ASSET, PAIR } from '../src/swap/constants.js';
+import { hashUnsignedEnvelope } from '../src/swap/hash.js';
 import { hashTermsEnvelope } from '../src/swap/terms.js';
 import { verifySwapPrePay, verifySwapPrePayOnchain } from '../src/swap/verify.js';
 import {
@@ -44,6 +45,7 @@ Invite/Welcome helpers (signed by the peer via SC-Bridge sign):
 Swap message helpers (signed swap envelopes, sent over sidechannels):
   rfq --channel <otcChannel> --trade-id <id> --btc-sats <n> --usdt-amount <atomicStr> [--valid-until-unix <sec>]
   quote --channel <otcChannel> --trade-id <id> --rfq-id <id> --btc-sats <n> --usdt-amount <atomicStr> --valid-until-unix <sec>
+  quote-from-rfq --channel <otcChannel> --rfq-json <envelope|@file> [--btc-sats <n>] [--usdt-amount <atomicStr>] [--valid-until-unix <sec>]
   terms --channel <swapChannel> --trade-id <id> --btc-sats <n> --usdt-amount <atomicStr> --sol-mint <base58> --sol-recipient <base58> --sol-refund <base58> --sol-refund-after-unix <sec> --ln-receiver-peer <hex32> --ln-payer-peer <hex32> [--terms-valid-until-unix <sec>]
   accept --channel <swapChannel> --trade-id <id> (--terms-hash <hex> | --terms-json <envelope|@file>)
 
@@ -411,6 +413,45 @@ async function main() {
     const signed = await withScBridge({ url, token }, (sc) => signSwapEnvelope(sc, unsigned));
     await sendSigned(channel, signed);
     process.stdout.write(`${JSON.stringify(signed, null, 2)}\n`);
+    return;
+  }
+
+  if (cmd === 'quote-from-rfq') {
+    const channel = requireFlag(flags, 'channel');
+    const rfqRaw = parseJsonOrBase64(requireFlag(flags, 'rfq-json'));
+    if (!rfqRaw) die('Invalid --rfq-json (expected JSON/base64/@file)');
+
+    const v = validateSwapEnvelope(rfqRaw);
+    if (!v.ok) die(`Invalid rfq envelope: ${v.error}`);
+    if (rfqRaw.kind !== KIND.RFQ) die(`Invalid rfq envelope kind=${rfqRaw.kind}`);
+
+    const { sig: _sig, signer: _signer, ...rfqUnsigned } = rfqRaw;
+    const rfqId = hashUnsignedEnvelope(rfqUnsigned);
+
+    const tradeId = String(rfqRaw.trade_id);
+    const btcSats = maybeInt(flags.get('btc-sats'), 'btc-sats') ?? rfqRaw.body.btc_sats;
+    const usdtAmount = (flags.get('usdt-amount') && String(flags.get('usdt-amount'))) || rfqRaw.body.usdt_amount;
+    const validUntilUnix =
+      maybeInt(flags.get('valid-until-unix'), 'valid-until-unix') || Math.floor(Date.now() / 1000) + 60;
+
+    const unsigned = createUnsignedEnvelope({
+      v: 1,
+      kind: KIND.QUOTE,
+      tradeId,
+      body: {
+        rfq_id: rfqId,
+        pair: PAIR.BTC_LN__USDT_SOL,
+        direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+        btc_sats: btcSats,
+        usdt_amount: usdtAmount,
+        valid_until_unix: validUntilUnix,
+      },
+    });
+
+    const signed = await withScBridge({ url, token }, (sc) => signSwapEnvelope(sc, unsigned));
+    await sendSigned(channel, signed);
+    process.stdout.write(`${JSON.stringify(signed, null, 2)}\n`);
+    process.stdout.write(`rfq_id=${rfqId}\n`);
     return;
   }
 

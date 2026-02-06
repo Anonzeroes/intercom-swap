@@ -67,6 +67,7 @@ This repo includes `scripts/swapctl.mjs` (with wrappers `scripts/swapctl.sh` and
 - open/join/send sidechannels over SC-Bridge
 - create owner-signed welcomes + invites (via SC-Bridge signing)
 - send signed swap messages (`rfq`, `quote`, `terms`, `accept`) with schema validation
+- convenience: build + send a quote directly from an RFQ envelope (`quote-from-rfq`)
 - inspect a running peer via SC-Bridge (`info`, `stats`) and watch sidechannel traffic (`watch`)
 - verify swap pre-pay safety checks (offline + optional Solana on-chain validation) (`verify-prepay`)
 
