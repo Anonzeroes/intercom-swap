@@ -166,9 +166,14 @@ export function decodeEscrowState(data) {
   };
 }
 
-export async function getEscrowState(connection, paymentHashHex, programId = LN_USDT_ESCROW_PROGRAM_ID) {
+export async function getEscrowState(
+  connection,
+  paymentHashHex,
+  programId = LN_USDT_ESCROW_PROGRAM_ID,
+  commitment = 'confirmed'
+) {
   const { pda } = deriveEscrowPda(paymentHashHex, programId);
-  const info = await connection.getAccountInfo(pda, 'confirmed');
+  const info = await connection.getAccountInfo(pda, commitment);
   if (!info) return null;
   return decodeEscrowState(info.data);
 }

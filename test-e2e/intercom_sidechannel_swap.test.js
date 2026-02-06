@@ -27,6 +27,7 @@ import { KIND, ASSET, PAIR, STATE } from '../src/swap/constants.js';
 import { hashUnsignedEnvelope } from '../src/swap/hash.js';
 import { applySwapEnvelope, createInitialTrade } from '../src/swap/stateMachine.js';
 import { validateSwapEnvelope } from '../src/swap/schema.js';
+import { verifySwapPrePayOnchain } from '../src/swap/verify.js';
 
 import {
   createSignedInvite,
@@ -823,6 +824,16 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
     bobTrade = r.trade;
     assert.equal(bobTrade.state, STATE.ESCROW);
   }
+
+  // Client verifies escrow state on-chain (hard rule: no escrow verified, no LN payment sent).
+  const prepay = await verifySwapPrePayOnchain({
+    terms: bobTrade.terms,
+    invoiceBody: bobTrade.invoice,
+    escrowBody: bobTrade.escrow,
+    connection,
+    now_unix: Math.floor(Date.now() / 1000),
+  });
+  assert.equal(prepay.ok, true, prepay.error);
 
   // Client pays LN invoice and claims escrow with preimage.
   const payRes = await clnCli('cln-bob', ['pay', bolt11]);

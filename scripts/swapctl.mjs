@@ -7,12 +7,14 @@ import { createUnsignedEnvelope, attachSignature } from '../src/protocol/signedM
 import { validateSwapEnvelope } from '../src/swap/schema.js';
 import { KIND, ASSET, PAIR } from '../src/swap/constants.js';
 import { hashTermsEnvelope } from '../src/swap/terms.js';
+import { verifySwapPrePay, verifySwapPrePayOnchain } from '../src/swap/verify.js';
 import {
   createSignedInvite,
   normalizeInvitePayload,
   normalizeWelcomePayload,
   toB64Json,
 } from '../src/sidechannel/capabilities.js';
+import { Connection } from '@solana/web3.js';
 
 function die(msg) {
   process.stderr.write(`${msg}\n`);
@@ -23,7 +25,7 @@ function usage() {
   return `
 swapctl (SC-Bridge sidechannel + swap message helper)
 
-Required connection flags:
+Connection flags (required for SC-Bridge commands):
   --url <ws://127.0.0.1:49222>
   --token <sc-bridge-token>
 
@@ -44,6 +46,9 @@ Swap message helpers (signed swap envelopes, sent over sidechannels):
   quote --channel <otcChannel> --trade-id <id> --rfq-id <id> --btc-sats <n> --usdt-amount <atomicStr> --valid-until-unix <sec>
   terms --channel <swapChannel> --trade-id <id> --btc-sats <n> --usdt-amount <atomicStr> --sol-mint <base58> --sol-recipient <base58> --sol-refund <base58> --sol-refund-after-unix <sec> --ln-receiver-peer <hex32> --ln-payer-peer <hex32> [--terms-valid-until-unix <sec>]
   accept --channel <swapChannel> --trade-id <id> (--terms-hash <hex> | --terms-json <envelope|@file>)
+
+Verification helpers:
+  verify-prepay --terms-json <envelope|body|@file> --invoice-json <envelope|body|@file> --escrow-json <envelope|body|@file> [--now-unix <sec>] [--solana-rpc-url <url>] [--solana-commitment <confirmed|finalized|processed>]
 
 Notes:
   - This tool never touches private keys; it asks the peer to sign via SC-Bridge.
@@ -134,6 +139,11 @@ function maybeInt(value, label) {
   return n;
 }
 
+function extractBody(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  return payload.body && typeof payload.body === 'object' ? payload.body : payload;
+}
+
 async function withScBridge({ url, token }, fn) {
   const sc = new ScBridgeClient({ url, token });
   try {
@@ -167,6 +177,43 @@ async function main() {
 
   if (!cmd || cmd === '--help' || cmd === 'help') {
     process.stdout.write(`${usage()}\n`);
+    return;
+  }
+
+  if (cmd === 'verify-prepay') {
+    const termsRaw = parseJsonOrBase64(requireFlag(flags, 'terms-json'));
+    const invoiceRaw = parseJsonOrBase64(requireFlag(flags, 'invoice-json'));
+    const escrowRaw = parseJsonOrBase64(requireFlag(flags, 'escrow-json'));
+    if (!termsRaw) die('Invalid --terms-json (expected JSON/base64/@file)');
+    if (!invoiceRaw) die('Invalid --invoice-json (expected JSON/base64/@file)');
+    if (!escrowRaw) die('Invalid --escrow-json (expected JSON/base64/@file)');
+
+    const terms = extractBody(termsRaw);
+    const invoiceBody = extractBody(invoiceRaw);
+    const escrowBody = extractBody(escrowRaw);
+    const nowUnix = maybeInt(flags.get('now-unix'), 'now-unix');
+
+    const rpcUrlRaw = flags.get('solana-rpc-url') ? String(flags.get('solana-rpc-url')).trim() : '';
+    const commitmentRaw = flags.get('solana-commitment')
+      ? String(flags.get('solana-commitment')).trim()
+      : 'confirmed';
+
+    if (rpcUrlRaw) {
+      const connection = new Connection(rpcUrlRaw, commitmentRaw);
+      const res = await verifySwapPrePayOnchain({
+        terms,
+        invoiceBody,
+        escrowBody,
+        connection,
+        commitment: commitmentRaw,
+        now_unix: nowUnix,
+      });
+      process.stdout.write(`${JSON.stringify(res, null, 2)}\n`);
+      return;
+    }
+
+    const res = verifySwapPrePay({ terms, invoiceBody, escrowBody, now_unix: nowUnix });
+    process.stdout.write(`${JSON.stringify(res, null, 2)}\n`);
     return;
   }
 

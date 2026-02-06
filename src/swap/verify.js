@@ -1,4 +1,5 @@
 import { verifyBolt11MatchesInvoiceBody } from '../ln/bolt11.js';
+import { verifyLnUsdtEscrowOnchain } from '../solana/verifyLnUsdtEscrow.js';
 
 const normalizeHex = (value) => String(value || '').trim().toLowerCase();
 
@@ -73,3 +74,26 @@ export function verifySwapPrePay({ terms, invoiceBody, escrowBody, now_unix = nu
   return { ok: true, error: null, decoded_invoice: inv.decoded };
 }
 
+export async function verifySwapPrePayOnchain({
+  terms,
+  invoiceBody,
+  escrowBody,
+  connection,
+  commitment = 'confirmed',
+  now_unix = null,
+} = {}) {
+  const base = verifySwapPrePay({ terms, invoiceBody, escrowBody, now_unix });
+  if (!base.ok) return base;
+
+  const onchain = await verifyLnUsdtEscrowOnchain({ connection, escrowBody, commitment });
+  if (!onchain.ok) {
+    return {
+      ok: false,
+      error: `escrow onchain invalid: ${onchain.error}`,
+      decoded_invoice: base.decoded_invoice,
+      onchain,
+    };
+  }
+
+  return { ok: true, error: null, decoded_invoice: base.decoded_invoice, onchain };
+}
