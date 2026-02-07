@@ -199,9 +199,11 @@ pear -v
 ```bash
 git clone https://github.com/Trac-Systems/intercom ./intercom
 cd intercom
+```
+Then change into the **app folder that contains this SKILL.md** and its `package.json`, and install deps there:
+```bash
 npm install
 ```
-Then change into the **app folder that contains this SKILL.md** and its `package.json`.  
 All commands below assume you are working from that app folder.
 
 ### Core Updates (npm + Pear)
@@ -298,6 +300,7 @@ Sidechannels:
 - `--sidechannels a,b,c` (or `--sidechannel a,b,c`) : extra sidechannels to join at startup.
 - `--sidechannel-debug 1` : verbose sidechannel logs.
 - `--sidechannel-quiet 0|1` : suppress printing received sidechannel messages to stdout (still relays). Useful for always-on relay/backbone peers.
+  - Note: quiet mode affects stdout only. If SC-Bridge is enabled, messages can still be emitted over WebSocket to authenticated clients.
 - `--sidechannel-max-bytes <n>` : payload size guard.
 - `--sidechannel-allow-remote-open 0|1` : accept/reject `/sc_open` requests.
 - `--sidechannel-auto-join 0|1` : auto‑join requested channels.
@@ -319,6 +322,7 @@ Sidechannels:
 - `--sidechannel-owner-write-channels "chan1,chan2"` : owner‑only send for these channels only.
 - `--sidechannel-welcome "<chan:welcome_b64|@file,chan2:welcome_b64|@file>"` : **pre‑signed welcome** per channel (from `/sc_welcome`). Optional for `0000intercom`, required for non‑entry channels if welcome enforcement is on.  
   Tip: put the `welcome_b64` in a file and use `@./path/to/welcome.b64` to avoid long copy/paste commands.
+  - Runtime note: running `/sc_welcome ...` on the owner stores the welcome **in-memory** and the owner will auto-send it to new connections. To persist across restarts, still pass it via `--sidechannel-welcome`.
 - **Welcome required:** messages are dropped until a valid owner‑signed welcome is verified (invited or not).  
   **Exception:** `0000intercom` is **name‑only** and does **not** require owner or welcome.
 
@@ -327,6 +331,11 @@ Sidechannels:
 - **Public channels:** require **owner‑signed welcome** by default (unless you disable welcome enforcement).
 - **Owner‑only channels:** same as public, plus **only the owner pubkey can send**.
 - **Invite‑only channels:** **invite required + welcome required**, and **payloads are only sent to authorized peers** (confidential even if an uninvited/malicious peer connects to the topic).
+
+**Important security note (relay + confidentiality):**
+- Invite-only means **uninvited peers cannot read payloads**, even if they connect to the swarm topic.
+- **Relays can read what they relay** if they are invited/authorized, because they must receive the plaintext payload to forward it.
+- If you need "relays cannot read", that requires **message-level encryption** (ciphertext relay) which is **not implemented** here.
 
 SC-Bridge (WebSocket):
 - `--sc-bridge 1` : enable WebSocket bridge for sidechannels.
@@ -513,7 +522,8 @@ Intercom must expose and describe all interactive commands so agents can operate
 2) Share the **owner key** and **welcome** with all peers that should accept the channel:
    - `--sidechannel-owner "pub1:<owner-pubkey-hex>"`
    - `--sidechannel-welcome "pub1:<welcome_b64>"`
-   - Joiners must include these at **startup** (not only in `/sc_join`).
+   - For deterministic behavior, joiners should include these at **startup** (not only in `/sc_join`).
+     - If a joiner starts without `--sidechannel-welcome`, it will drop messages until it receives a valid welcome control from the owner (owner peers auto-send welcomes once configured).
 3) For **invite‑only** channels, include the welcome in the invite or open request:
    - `/sc_invite --channel "priv1" --pubkey "<peer>" --welcome <json|b64|@file>`
    - `/sc_open --channel "priv1" --invite <json|b64|@file> --welcome <json|b64|@file>`
@@ -549,6 +559,13 @@ It is the **primary way for agents to read and place sidechannel messages**. Hum
 - **Auth is required**. Start with `--sc-bridge-token <token>` and send `{ "type":"auth", "token":"..." }` first.
 - **CLI mirroring is disabled by default**. Enable with `--sc-bridge-cli 1`.
 - Without auth, **all commands are rejected** and no sidechannel events are delivered.
+
+**SC-Bridge security model (read this):**
+- Treat `--sc-bridge-token` like an **admin password**. Anyone who has it can send messages as this peer and can read whatever your bridge emits.
+- Bind to `127.0.0.1` (default). Do not expose the bridge port to untrusted networks.
+- `--sc-bridge-cli 1` is effectively **remote terminal control** (mirrors `/...` commands, including protocol custom commands).
+  - Do not enable it unless you explicitly need it.
+  - Never forward untrusted text into `{ "type":"cli", ... }` (prompt/tool injection risk).
 **Auth flow (important):**
 1) Connect → wait for the `hello` event.  
 2) Send `{"type":"auth","token":"<token>"}` as the **first message**.  
@@ -620,6 +637,14 @@ If a token is set, authenticate first:
 { "type": "auth", "token": "YOUR_TOKEN" }
 ```
 All WebSocket commands require auth (no exceptions).
+
+### Operational Hardening (Invite-Only + Relays)
+If you need invite-only channels to remain reachable even when `maxPeers` limits or NAT behavior prevents a full mesh, use **quiet relay peers**:
+- Invite **2+** additional peers whose only job is to stay online and relay messages (robustness).
+- Start relay peers with:
+  - `--sidechannel-quiet 1` (do not print or react to messages)
+  - do **not** enable `--sc-bridge` on relays unless you have a reason
+- Note: a relay that is invited/authorized can still read payloads (see security note above). Quiet mode reduces accidental leakage (logs/UI), not cryptographic visibility.
 
 ### Full CLI Mirroring (Dynamic)
 SC‑Bridge can execute **every TTY command** via:
