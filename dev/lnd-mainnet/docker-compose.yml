@@ -1,0 +1,46 @@
+services:
+  lnd-maker:
+    image: lightninglabs/lnd:v0.18.0-beta
+    command:
+      - "--alias=maker"
+      - "--debuglevel=info"
+      - "--listen=0.0.0.0:9735"
+      - "--rpclisten=0.0.0.0:10009"
+      - "--restlisten=0.0.0.0:8080"
+      - "--bitcoin.active"
+      - "--bitcoin.mainnet"
+      - "--bitcoin.node=neutrino"
+      # Required for neutrino on mainnet (fee estimation source).
+      - "--fee.url=https://nodes.lightning.computer/fees/v1/btc-fee-estimates.json"
+      # Public neutrino peers (compact filters). Override locally if you run your own.
+      - "--neutrino.addpeer=btcd-mainnet.lightning.computer:8333"
+      - "--neutrino.addpeer=faucet.lightning.community:8333"
+      - "--neutrino.addpeer=mainnet1-btcd.zaphq.io:8333"
+      - "--neutrino.addpeer=mainnet2-btcd.zaphq.io:8333"
+    volumes:
+      - lnd_maker_datadir:/root/.lnd
+
+  lnd-taker:
+    image: lightninglabs/lnd:v0.18.0-beta
+    command:
+      - "--alias=taker"
+      - "--debuglevel=info"
+      - "--listen=0.0.0.0:9735"
+      - "--rpclisten=0.0.0.0:10009"
+      - "--restlisten=0.0.0.0:8080"
+      - "--bitcoin.active"
+      - "--bitcoin.mainnet"
+      - "--bitcoin.node=neutrino"
+      # Required for neutrino on mainnet (fee estimation source).
+      - "--fee.url=https://nodes.lightning.computer/fees/v1/btc-fee-estimates.json"
+      # Public neutrino peers (compact filters). Override locally if you run your own.
+      - "--neutrino.addpeer=btcd-mainnet.lightning.computer:8333"
+      - "--neutrino.addpeer=faucet.lightning.community:8333"
+      - "--neutrino.addpeer=mainnet1-btcd.zaphq.io:8333"
+      - "--neutrino.addpeer=mainnet2-btcd.zaphq.io:8333"
+    volumes:
+      - lnd_taker_datadir:/root/.lnd
+
+volumes:
+  lnd_maker_datadir: {}
+  lnd_taker_datadir: {}
