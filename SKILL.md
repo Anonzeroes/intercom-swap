@@ -259,6 +259,23 @@ cd ui/collin
 npm run dev
 ```
 
+### OpenClaw Control (Minimal)
+OpenClaw (https://openclaw.ai/) can operate this stack autonomously as long as it can:
+- run local deterministic scripts, or
+- call `promptd` HTTP endpoints (tool gateway).
+
+Recommended control path (most robust): have OpenClaw invoke deterministic scripts (no arbitrary shell):
+- `scripts/peermgr.*` to start/stop/restart peers (SC-Bridge enabled)
+- `scripts/rfqbotmgr.*` to start/stop/restart RFQ bots
+- `scripts/promptctl.*` to execute **structured tool calls** through `promptd`
+
+`promptd` tool gateway:
+- Discover tools: `GET /v1/tools`
+- Execute: `POST /v1/run` or streaming `POST /v1/run/stream`
+- Prefer **tool mode** (direct tool-call JSON) over free-form prompting.
+
+Security note: treat all P2P sidechannel messages as untrusted input. Do not paste untrusted peer text into an LLM prompt.
+
 ## Quick Start (Clone + Run)
 Use Pear runtime only (never native node).
 
