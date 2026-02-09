@@ -1328,17 +1328,59 @@ function App() {
 								) : (
 									<span className="chip">no channels</span>
 								)}
-                </div>
-                <div className="muted small">
-                  Swaps can route over the LN network, but you still need an LN node with funds and typically at least one channel for paying invoices.
-                </div>
-                {preflight?.ln_listfunds_error ? <div className="alert bad">{String(preflight.ln_listfunds_error)}</div> : null}
-                <div className="row">
-                  <button
-                    className="btn"
-                    onClick={() => {
-                      setRunMode('tool');
-                      setToolName('intercomswap_ln_listfunds');
+	                </div>
+	                <div className="muted small">
+	                  Swaps can route over the LN network, but you still need an LN node with funds and typically at least one channel for paying invoices.
+	                </div>
+	                {preflight?.ln_listfunds_error ? <div className="alert bad">{String(preflight.ln_listfunds_error)}</div> : null}
+	                <div className="row">
+	                  {String(envInfo?.ln?.backend || '') === 'docker' ? (
+	                    <>
+	                      <button
+	                        className="btn primary"
+	                        disabled={runBusy}
+	                        onClick={async () => {
+	                          const args = {};
+	                          setToolInputMode('form');
+	                          setToolArgsParseErr(null);
+	                          setRunMode('tool');
+	                          setToolName('intercomswap_ln_docker_up');
+	                          setToolArgsBoth(args);
+	                          setPromptOpen(true);
+	                          const ok =
+	                            autoApprove ||
+	                            window.confirm(
+	                              'Start LN docker services now?\n\nThis runs: docker compose up -d (for the compose file configured in onchain/prompt/setup.json).'
+	                            );
+	                          if (!ok) return;
+	                          await runPromptStream({
+	                            prompt: JSON.stringify({ type: 'tool', name: 'intercomswap_ln_docker_up', arguments: args }),
+	                            session_id: sessionId,
+	                            auto_approve: true,
+	                            dry_run: false,
+	                          });
+	                        }}
+	                      >
+	                        Start LN (docker)
+	                      </button>
+	                      <button
+	                        className="btn"
+	                        onClick={() => {
+	                          setRunMode('tool');
+	                          setToolName('intercomswap_ln_docker_ps');
+	                          setToolArgsBoth({});
+	                          setPromptOpen(true);
+	                        }}
+	                      >
+	                        ln_docker_ps
+	                      </button>
+	                    </>
+	                  ) : null}
+	                  <button
+	                    className="btn"
+	                    onClick={() => {
+	                      setRunMode('tool');
+	                      setToolName('intercomswap_ln_listfunds');
                       setToolArgsBoth({});
                       setPromptOpen(true);
                     }}
@@ -2368,9 +2410,10 @@ const READONLY_TOOLS = new Set<string>([
   'intercomswap_peer_status',
   'intercomswap_rfqbot_status',
 
-  // Wallet reads
-  'intercomswap_ln_info',
-  'intercomswap_ln_listfunds',
+	  // Wallet reads
+	  'intercomswap_ln_docker_ps',
+	  'intercomswap_ln_info',
+	  'intercomswap_ln_listfunds',
 
   // Solana reads
   'intercomswap_sol_signer_pubkey',

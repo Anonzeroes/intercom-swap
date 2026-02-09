@@ -499,6 +499,41 @@ export const INTERCOMSWAP_TOOLS = [
   ),
 
   // Lightning (LN) operator actions (executor must use configured backend/credentials).
+  tool('intercomswap_ln_docker_ps', 'Docker-only: show docker compose service status for the configured LN compose stack.', {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      // Optional override (must be within repo root).
+      compose_file: { type: 'string', minLength: 1, maxLength: 400, pattern: '^[^\\s]+$' },
+    },
+    required: [],
+  }),
+  tool('intercomswap_ln_docker_up', 'Docker-only: start LN docker services (defaults to bitcoind + configured LN service).', {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      services: {
+        type: 'array',
+        minItems: 0,
+        maxItems: 10,
+        items: { type: 'string', minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' },
+        description: 'Optional docker compose service names. If omitted, uses defaults.',
+      },
+      // Optional override (must be within repo root).
+      compose_file: { type: 'string', minLength: 1, maxLength: 400, pattern: '^[^\\s]+$' },
+    },
+    required: [],
+  }),
+  tool('intercomswap_ln_docker_down', 'Docker-only: stop the LN docker compose stack.', {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      // Optional override (must be within repo root).
+      compose_file: { type: 'string', minLength: 1, maxLength: 400, pattern: '^[^\\s]+$' },
+      volumes: { type: 'boolean', description: 'If true, also remove named volumes (DANGEROUS; deletes regtest state).' },
+    },
+    required: [],
+  }),
   tool('intercomswap_ln_info', 'Get Lightning node info (impl/backend configured locally).', emptyParams),
   tool('intercomswap_ln_newaddr', 'Get a new on-chain BTC address from the LN node wallet.', emptyParams),
   tool('intercomswap_ln_listfunds', 'Get on-chain + channel balances.', emptyParams),

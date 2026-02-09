@@ -1,6 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileP = promisify(execFile);
 
 import { Keypair, PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
 import {
@@ -306,6 +310,49 @@ function resolveOnchainPath(p, { label = 'path', allowDir = false } = {}) {
     if (st && st.isDirectory()) throw new Error(`${label} must be a file path (got directory)`);
   }
   return resolved;
+}
+
+function resolveWithinRepoRoot(p, { label = 'path', mustExist = false, allowDir = false } = {}) {
+  const resolved = resolveRepoPath(p);
+  const root = path.resolve(process.cwd());
+  const rel = path.relative(root, resolved);
+  const within = rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+  if (!within && resolved !== root) {
+    throw new Error(`${label} must be within the repo root (got ${resolved})`);
+  }
+  if (mustExist && !fs.existsSync(resolved)) {
+    throw new Error(`${label} does not exist: ${resolved}`);
+  }
+  if (!allowDir) {
+    const st = fs.existsSync(resolved) ? fs.statSync(resolved) : null;
+    if (st && st.isDirectory()) throw new Error(`${label} must be a file path (got directory)`);
+  }
+  return resolved;
+}
+
+function normalizeDockerServiceName(value, label = 'service') {
+  const s = String(value || '').trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(s)) {
+    throw new Error(`${label}: invalid docker compose service name`);
+  }
+  return s;
+}
+
+async function dockerCompose({ composeFile, args, cwd }) {
+  try {
+    const { stdout, stderr } = await execFileP('docker', ['compose', '-f', composeFile, ...args], {
+      cwd,
+      maxBuffer: 1024 * 1024 * 10,
+    });
+    return { stdout: String(stdout || ''), stderr: String(stderr || '') };
+  } catch (err) {
+    const stderr = String(err?.stderr || '').trim();
+    const stdout = String(err?.stdout || '').trim();
+    const msg = stderr || stdout || err?.message || String(err);
+    const e = new Error(msg);
+    e.code = err?.code;
+    throw e;
+  }
 }
 
 export class ToolExecutor {
@@ -1616,6 +1663,94 @@ export class ToolExecutor {
       } finally {
         store.close();
       }
+    }
+
+    // LN docker stack management (local dev/test convenience).
+    // NOTE: this is intentionally limited to `docker compose -f <composeFile> {ps,up,down}`.
+    if (toolName === 'intercomswap_ln_docker_ps') {
+      assertAllowedKeys(args, toolName, ['compose_file']);
+      if (String(this.ln?.backend || '').trim() !== 'docker') {
+        throw new Error(`${toolName}: ln.backend must be "docker"`);
+      }
+      const composeFileRaw = args.compose_file ? String(args.compose_file).trim() : String(this.ln?.composeFile || '').trim();
+      if (!composeFileRaw) throw new Error(`${toolName}: missing compose file (ln.compose_file)`);
+      const composeFile = resolveWithinRepoRoot(composeFileRaw, { label: 'compose_file', mustExist: true });
+      const { stdout } = await dockerCompose({ composeFile, args: ['ps', '--format', 'json'], cwd: process.cwd() });
+      const text = String(stdout || '').trim();
+      let services = [];
+      if (text) {
+        try {
+          services = JSON.parse(text);
+        } catch (_e) {
+          // docker compose prints nothing when the project is down; treat as empty list.
+          services = [];
+        }
+      }
+      if (!Array.isArray(services)) services = [];
+      return { type: 'ln_docker_ps', compose_file: composeFile, services };
+    }
+
+    if (toolName === 'intercomswap_ln_docker_up') {
+      assertAllowedKeys(args, toolName, ['services', 'compose_file']);
+      requireApproval(toolName, autoApprove);
+      if (String(this.ln?.backend || '').trim() !== 'docker') {
+        throw new Error(`${toolName}: ln.backend must be "docker"`);
+      }
+      const composeFileRaw = args.compose_file ? String(args.compose_file).trim() : String(this.ln?.composeFile || '').trim();
+      if (!composeFileRaw) throw new Error(`${toolName}: missing compose file (ln.compose_file)`);
+      const composeFile = resolveWithinRepoRoot(composeFileRaw, { label: 'compose_file', mustExist: true });
+
+      const want = Array.isArray(args.services) ? args.services : [];
+      const services = [];
+      if (want.length > 0) {
+        const seen = new Set();
+        for (const s of want) {
+          const svc = normalizeDockerServiceName(s, 'services');
+          if (seen.has(svc)) continue;
+          seen.add(svc);
+          services.push(svc);
+        }
+      } else {
+        const cfgSvc = String(this.ln?.service || '').trim();
+        if (cfgSvc) {
+          services.push('bitcoind', normalizeDockerServiceName(cfgSvc, 'ln.service'));
+        }
+      }
+
+      const fullArgs = ['up', '-d', '--remove-orphans'];
+      if (services.length > 0) fullArgs.push(...services);
+      if (dryRun) return { type: 'dry_run', tool: toolName, compose_file: composeFile, services: services.length > 0 ? services : null };
+      const out = await dockerCompose({ composeFile, args: fullArgs, cwd: process.cwd() });
+      return {
+        type: 'ln_docker_up',
+        compose_file: composeFile,
+        services: services.length > 0 ? services : null,
+        stdout: String(out.stdout || '').trim() || null,
+        stderr: String(out.stderr || '').trim() || null,
+      };
+    }
+
+    if (toolName === 'intercomswap_ln_docker_down') {
+      assertAllowedKeys(args, toolName, ['compose_file', 'volumes']);
+      requireApproval(toolName, autoApprove);
+      if (String(this.ln?.backend || '').trim() !== 'docker') {
+        throw new Error(`${toolName}: ln.backend must be "docker"`);
+      }
+      const composeFileRaw = args.compose_file ? String(args.compose_file).trim() : String(this.ln?.composeFile || '').trim();
+      if (!composeFileRaw) throw new Error(`${toolName}: missing compose file (ln.compose_file)`);
+      const composeFile = resolveWithinRepoRoot(composeFileRaw, { label: 'compose_file', mustExist: true });
+      const volumes = 'volumes' in args ? expectBool(args, toolName, 'volumes') : false;
+      const fullArgs = ['down'];
+      if (volumes) fullArgs.push('--volumes');
+      if (dryRun) return { type: 'dry_run', tool: toolName, compose_file: composeFile, volumes };
+      const out = await dockerCompose({ composeFile, args: fullArgs, cwd: process.cwd() });
+      return {
+        type: 'ln_docker_down',
+        compose_file: composeFile,
+        volumes,
+        stdout: String(out.stdout || '').trim() || null,
+        stderr: String(out.stderr || '').trim() || null,
+      };
     }
 
     // Lightning tools
