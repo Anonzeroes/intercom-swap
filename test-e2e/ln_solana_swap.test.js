@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import net from 'node:net';
 
 import { Connection, Keypair, PublicKey } from '@solana/web3.js';
 import {
@@ -120,8 +121,55 @@ function hasConfirmedUtxo(listFundsResult) {
   return outs.some((o) => String(o?.status || '').toLowerCase() === 'confirmed');
 }
 
-async function startSolanaValidator({ soPath }) {
-  const ledgerPath = path.join(repoRoot, 'onchain/solana/ledger-e2e');
+async function pickFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+async function pickFreePorts(n) {
+  const out = new Set();
+  while (out.size < n) out.add(await pickFreePort());
+  return Array.from(out);
+}
+
+async function isTcpPortFree(port) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on('error', () => resolve(false));
+    srv.listen(port, '127.0.0.1', () => srv.close(() => resolve(true)));
+  });
+}
+
+async function pickFreeRpcPortWithWs() {
+  // solana-test-validator uses rpc-port for HTTP and rpc-port+1 for PubSub websocket.
+  for (let i = 0; i < 200; i += 1) {
+    const rpcPort = await pickFreePort();
+    if (!Number.isInteger(rpcPort) || rpcPort < 1024 || rpcPort >= 65535) continue;
+    const wsPort = rpcPort + 1;
+    if (wsPort >= 65535) continue;
+    if (await isTcpPortFree(wsPort)) return rpcPort;
+  }
+  throw new Error('Failed to pick free Solana rpc port (and rpc+1 websocket port)');
+}
+
+async function startSolanaValidator({ soPath, ledgerSuffix }) {
+  const rpcPort = await pickFreeRpcPortWithWs();
+  const wsPort = rpcPort + 1;
+  let faucetPort = await pickFreePort();
+  for (let i = 0; i < 50; i += 1) {
+    if (faucetPort !== rpcPort && faucetPort !== wsPort) break;
+    faucetPort = await pickFreePort();
+  }
+  const ledgerPath = path.join(repoRoot, `onchain/solana/ledger-e2e-${ledgerSuffix}`);
   const args = [
     '--reset',
     '--ledger',
@@ -129,9 +177,9 @@ async function startSolanaValidator({ soPath }) {
     '--bind-address',
     '127.0.0.1',
     '--rpc-port',
-    '8899',
+    String(rpcPort),
     '--faucet-port',
-    '9900',
+    String(faucetPort),
     '--bpf-program',
     LN_USDT_ESCROW_PROGRAM_ID.toBase58(),
     soPath,
@@ -152,12 +200,19 @@ async function startSolanaValidator({ soPath }) {
   proc.stdout.on('data', (d) => append(String(d)));
   proc.stderr.on('data', (d) => append(String(d)));
 
-  const connection = new Connection('http://127.0.0.1:8899', 'confirmed');
+  const rpcUrl = `http://127.0.0.1:${rpcPort}`;
+  const wsUrl = `ws://127.0.0.1:${wsPort}`;
+  const connection = new Connection(rpcUrl, { commitment: 'confirmed', wsEndpoint: wsUrl });
   await retry(() => connection.getVersion(), { label: 'solana rpc ready', tries: 120, delayMs: 500 });
 
   return {
     proc,
     connection,
+    rpcUrl,
+    rpcPort,
+    wsUrl,
+    wsPort,
+    faucetPort,
     tail: () => out,
     stop: async () => {
       proc.kill('SIGINT');
@@ -176,6 +231,7 @@ async function sendAndConfirm(connection, tx) {
 }
 
 test('e2e: LN<->Solana escrow flows', async (t) => {
+  const runId = crypto.randomBytes(4).toString('hex');
   // Ensure our SBF program is built.
   await sh('cargo', ['build-sbf'], { cwd: path.join(repoRoot, 'solana/ln_usdt_escrow') });
   const soPath = path.join(repoRoot, 'solana/ln_usdt_escrow/target/deploy/ln_usdt_escrow.so');
@@ -258,7 +314,7 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
   const paymentHashHex = parseHex32(invoice.payment_hash, 'payment_hash');
 
   // Start Solana local validator with our program loaded.
-  const sol = await startSolanaValidator({ soPath });
+  const sol = await startSolanaValidator({ soPath, ledgerSuffix: runId });
   t.after(async () => {
     try {
       await sol.stop();
@@ -455,19 +511,19 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
     // Wait for timeout and refund.
     await new Promise((r) => setTimeout(r, 4000));
 
-    const refundRes = await nodeJson([
-      'scripts/swaprecover.mjs',
-      'refund',
-      '--receipts-db',
-      receiptsDb,
-      '--trade-id',
-      tradeId,
-      '--solana-rpc-url',
-      'http://127.0.0.1:8899',
-      '--solana-keypair',
-      keypairPath,
-      '--commitment',
-      'confirmed',
+	    const refundRes = await nodeJson([
+	      'scripts/swaprecover.mjs',
+	      'refund',
+	      '--receipts-db',
+	      receiptsDb,
+	      '--trade-id',
+	      tradeId,
+	      '--solana-rpc-url',
+	      sol.rpcUrl,
+	      '--solana-keypair',
+	      keypairPath,
+	      '--commitment',
+	      'confirmed',
     ]);
     assert.equal(refundRes.type, 'refunded');
     assert.equal(refundRes.payment_hash_hex, paymentHash2);
@@ -526,19 +582,19 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
     fs.writeFileSync(keypairPath, `${JSON.stringify(Array.from(solBob.secretKey))}\n`, { mode: 0o600 });
 
     const before = (await getAccount(connection, bobToken, 'confirmed')).amount;
-    const claimRes = await nodeJson([
-      'scripts/swaprecover.mjs',
-      'claim',
-      '--receipts-db',
-      receiptsDb,
-      '--trade-id',
-      tradeId,
-      '--solana-rpc-url',
-      'http://127.0.0.1:8899',
-      '--solana-keypair',
-      keypairPath,
-      '--commitment',
-      'confirmed',
+	    const claimRes = await nodeJson([
+	      'scripts/swaprecover.mjs',
+	      'claim',
+	      '--receipts-db',
+	      receiptsDb,
+	      '--trade-id',
+	      tradeId,
+	      '--solana-rpc-url',
+	      sol.rpcUrl,
+	      '--solana-keypair',
+	      keypairPath,
+	      '--commitment',
+	      'confirmed',
     ]);
     assert.equal(claimRes.type, 'claimed');
     assert.equal(claimRes.payment_hash_hex, paymentHash4);

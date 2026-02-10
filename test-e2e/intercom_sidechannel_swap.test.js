@@ -147,7 +147,36 @@ async function pickFreePorts(n) {
   return Array.from(out);
 }
 
+async function isTcpPortFree(port) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on('error', () => resolve(false));
+    srv.listen(port, '127.0.0.1', () => srv.close(() => resolve(true)));
+  });
+}
+
+async function pickFreeRpcPortWithWs() {
+  // solana-test-validator uses rpc-port for HTTP and rpc-port+1 for the websocket endpoint.
+  for (let i = 0; i < 200; i += 1) {
+    const rpcPort = await pickFreePort();
+    if (!Number.isInteger(rpcPort) || rpcPort < 1024 || rpcPort >= 65535) continue;
+    const wsPort = rpcPort + 1;
+    if (wsPort >= 65535) continue;
+    if (await isTcpPortFree(wsPort)) return rpcPort;
+  }
+  throw new Error('Failed to pick free Solana rpc port (and rpc+1 websocket port)');
+}
+
 async function startSolanaValidator({ soPath, ledgerSuffix }) {
+  const rpcPort = await pickFreeRpcPortWithWs();
+  const wsPort = rpcPort + 1;
+  // Faucet port is independent; avoid collisions with rpc/ws.
+  let faucetPort = await pickFreePort();
+  for (let i = 0; i < 50; i += 1) {
+    if (faucetPort !== rpcPort && faucetPort !== wsPort) break;
+    faucetPort = await pickFreePort();
+  }
   const ledgerPath = path.join(repoRoot, `onchain/solana/ledger-e2e-${ledgerSuffix}`);
   const args = [
     '--reset',
@@ -156,9 +185,9 @@ async function startSolanaValidator({ soPath, ledgerSuffix }) {
     '--bind-address',
     '127.0.0.1',
     '--rpc-port',
-    '8899',
+    String(rpcPort),
     '--faucet-port',
-    '9900',
+    String(faucetPort),
     '--bpf-program',
     LN_USDT_ESCROW_PROGRAM_ID.toBase58(),
     soPath,
@@ -179,12 +208,19 @@ async function startSolanaValidator({ soPath, ledgerSuffix }) {
   proc.stdout.on('data', (d) => append(String(d)));
   proc.stderr.on('data', (d) => append(String(d)));
 
-  const connection = new Connection('http://127.0.0.1:8899', 'confirmed');
+  const rpcUrl = `http://127.0.0.1:${rpcPort}`;
+  const wsUrl = `ws://127.0.0.1:${wsPort}`;
+  const connection = new Connection(rpcUrl, { commitment: 'confirmed', wsEndpoint: wsUrl });
   await retry(() => connection.getVersion(), { label: 'solana rpc ready', tries: 120, delayMs: 500 });
 
   return {
     proc,
     connection,
+    rpcUrl,
+    rpcPort,
+    wsUrl,
+    wsPort,
+    faucetPort,
     tail: () => out,
     stop: async () => {
       proc.kill('SIGINT');
@@ -795,7 +831,7 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
       '--ln-network',
       'regtest',
       '--solana-rpc-url',
-      'http://127.0.0.1:8899',
+      sol.rpcUrl,
       '--solana-keypair',
       solServiceKeyPath,
       '--solana-mint',
@@ -842,7 +878,7 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
       '--ln-network',
       'regtest',
       '--solana-rpc-url',
-      'http://127.0.0.1:8899',
+      sol.rpcUrl,
       '--solana-keypair',
       solClientKeyPath,
       '--solana-mint',

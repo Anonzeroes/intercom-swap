@@ -4,6 +4,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import net from 'node:net';
 
 import { Connection, Keypair, PublicKey } from '@solana/web3.js';
 import {
@@ -151,7 +152,54 @@ async function lndCli(service, args) {
   return dockerComposeJson(['exec', '-T', service, 'lncli', '--network=regtest', ...args]);
 }
 
+async function pickFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+async function pickFreePorts(n) {
+  const out = new Set();
+  while (out.size < n) out.add(await pickFreePort());
+  return Array.from(out);
+}
+
+async function isTcpPortFree(port) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on('error', () => resolve(false));
+    srv.listen(port, '127.0.0.1', () => srv.close(() => resolve(true)));
+  });
+}
+
+async function pickFreeRpcPortWithWs() {
+  // solana-test-validator uses rpc-port for HTTP and rpc-port+1 for PubSub websocket.
+  for (let i = 0; i < 200; i += 1) {
+    const rpcPort = await pickFreePort();
+    if (!Number.isInteger(rpcPort) || rpcPort < 1024 || rpcPort >= 65535) continue;
+    const wsPort = rpcPort + 1;
+    if (wsPort >= 65535) continue;
+    if (await isTcpPortFree(wsPort)) return rpcPort;
+  }
+  throw new Error('Failed to pick free Solana rpc port (and rpc+1 websocket port)');
+}
+
 async function startSolanaValidator({ soPath, ledgerSuffix }) {
+  const rpcPort = await pickFreeRpcPortWithWs();
+  const wsPort = rpcPort + 1;
+  let faucetPort = await pickFreePort();
+  for (let i = 0; i < 50; i += 1) {
+    if (faucetPort !== rpcPort && faucetPort !== wsPort) break;
+    faucetPort = await pickFreePort();
+  }
   const ledgerPath = path.join(repoRoot, `onchain/solana/ledger-e2e-lnd-${ledgerSuffix}`);
   const args = [
     '--reset',
@@ -160,9 +208,9 @@ async function startSolanaValidator({ soPath, ledgerSuffix }) {
     '--bind-address',
     '127.0.0.1',
     '--rpc-port',
-    '8899',
+    String(rpcPort),
     '--faucet-port',
-    '9900',
+    String(faucetPort),
     '--bpf-program',
     LN_USDT_ESCROW_PROGRAM_ID.toBase58(),
     soPath,
@@ -183,12 +231,19 @@ async function startSolanaValidator({ soPath, ledgerSuffix }) {
   proc.stdout.on('data', (d) => append(String(d)));
   proc.stderr.on('data', (d) => append(String(d)));
 
-  const connection = new Connection('http://127.0.0.1:8899', 'confirmed');
+  const rpcUrl = `http://127.0.0.1:${rpcPort}`;
+  const wsUrl = `ws://127.0.0.1:${wsPort}`;
+  const connection = new Connection(rpcUrl, { commitment: 'confirmed', wsEndpoint: wsUrl });
   await retry(() => connection.getVersion(), { label: 'solana rpc ready', tries: 120, delayMs: 500 });
 
   return {
     proc,
     connection,
+    rpcUrl,
+    rpcPort,
+    wsUrl,
+    wsPort,
+    faucetPort,
     tail: () => out,
     stop: async () => {
       proc.kill('SIGINT');
