@@ -882,7 +882,7 @@ test('e2e: prompt tool offer_post broadcasts swap.svc_announce', async (t) => {
     pred: (m) => m?.kind === KIND.SVC_ANNOUNCE && String(m?.body?.name || '') === `preflight:${runId}`,
     // Under CPU+IO load (full e2e suite) discovery can take longer even with a local DHT bootstrapper.
     // Keep this generous to avoid flakes; the resender loop makes it fast when the swarm is healthy.
-    timeoutMs: 60_000,
+    timeoutMs: 120_000,
     label: 'preflight delivery',
   });
   ensureOk(await announcerSc.send(channel, preflight), 'send preflight (initial)');

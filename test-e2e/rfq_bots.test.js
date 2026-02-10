@@ -642,6 +642,51 @@ test('e2e: taker listens to maker Offers (svc_announce) and posts RFQ (Offer -> 
   ensureOk(await makerSc.subscribe([rfqChannel]), `subscribe ${rfqChannel} (maker)`);
   ensureOk(await takerSc.subscribe([rfqChannel]), `subscribe ${rfqChannel} (taker)`);
 
+  // Sidechannels are unbuffered: establish bidirectional connectivity before we rely on bots.
+  // This avoids flakes where the initial topic announce/lookup is missed and discovery takes longer.
+  {
+    const preflightA = { type: 'preflight', run_id: runId, who: 'maker' };
+    const preflightB = { type: 'preflight', run_id: runId, who: 'taker' };
+
+    const waitA = waitForSidechannel(takerSc, {
+      channel: rfqChannel,
+      pred: (m) => m?.type === 'preflight' && String(m?.run_id || '') === runId && String(m?.who || '') === 'maker',
+      timeoutMs: 120_000,
+      label: 'preflight maker->taker',
+    });
+    ensureOk(await makerSc.send(rfqChannel, preflightA), 'send preflight maker->taker (initial)');
+    let stopA = false;
+    const resendA = setInterval(async () => {
+      if (stopA) return;
+      try {
+        await makerSc.send(rfqChannel, preflightA);
+      } catch (_e) {}
+    }, 250);
+    t.after(() => clearInterval(resendA));
+    await waitA;
+    stopA = true;
+    clearInterval(resendA);
+
+    const waitB = waitForSidechannel(makerSc, {
+      channel: rfqChannel,
+      pred: (m) => m?.type === 'preflight' && String(m?.run_id || '') === runId && String(m?.who || '') === 'taker',
+      timeoutMs: 120_000,
+      label: 'preflight taker->maker',
+    });
+    ensureOk(await takerSc.send(rfqChannel, preflightB), 'send preflight taker->maker (initial)');
+    let stopB = false;
+    const resendB = setInterval(async () => {
+      if (stopB) return;
+      try {
+        await takerSc.send(rfqChannel, preflightB);
+      } catch (_e) {}
+    }, 250);
+    t.after(() => clearInterval(resendB));
+    await waitB;
+    stopB = true;
+    clearInterval(resendB);
+  }
+
   // Start bots.
   const makerBot = spawnBot(
     [
@@ -735,12 +780,13 @@ test('e2e: taker listens to maker Offers (svc_announce) and posts RFQ (Offer -> 
   }, 250);
   t.after(() => clearInterval(offerResender));
 
-  await waitForSidechannel(makerSc, {
-    channel: rfqChannel,
-    pred: (m) => m?.kind === KIND.RFQ,
-    timeoutMs: 20_000,
-    label: 'wait for RFQ response to offer',
-  });
+	  await waitForSidechannel(makerSc, {
+	    channel: rfqChannel,
+	    pred: (m) => m?.kind === KIND.RFQ,
+	    // Under CPU+IO load (full e2e suite) offer->rfq can take longer even with local DHT bootstrap.
+	    timeoutMs: 60_000,
+	    label: 'wait for RFQ response to offer',
+	  });
   offerStop = true;
   clearInterval(offerResender);
 
