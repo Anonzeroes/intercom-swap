@@ -518,6 +518,14 @@ export const INTERCOMSWAP_TOOLS = [
 
   // Backend multi-trade automation worker (server-side; replaces client-side orchestration).
   tool('intercomswap_tradeauto_status', 'Get backend trade-automation worker status and memory counters.', emptyParams),
+  tool('intercomswap_tradeauto_trace_set', 'Enable/disable backend trade-automation trace emission (off by default).', {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      trace_enabled: { type: 'boolean' },
+    },
+    required: ['trace_enabled'],
+  }),
   tool('intercomswap_tradeauto_start', 'Start backend multi-trade automation worker for subscribed sidechannels.', {
     type: 'object',
     additionalProperties: false,
@@ -542,6 +550,12 @@ export const INTERCOMSWAP_TOOLS = [
       terms_replay_max: { type: 'integer', minimum: 1, maximum: 500, description: 'Max maker terms replay attempts per trade (bounded liveness).' },
       swap_auto_leave_cooldown_ms: { type: 'integer', minimum: 1000, maximum: 120000, description: 'Cooldown between backend stale swap-channel leave retries.' },
       swap_auto_leave_max_attempts: { type: 'integer', minimum: 1, maximum: 50, description: 'Max backend stale swap-channel leave attempts per trade.' },
+      waiting_terms_trace_cooldown_ms: { type: 'integer', minimum: 1000, maximum: 120000, description: 'How often waiting_terms trace entries are emitted per trade.' },
+      waiting_terms_ping_cooldown_ms: { type: 'integer', minimum: 1000, maximum: 120000, description: 'Cooldown between taker waiting-terms recovery pings/replays.' },
+      waiting_terms_max_pings: { type: 'integer', minimum: 0, maximum: 500, description: 'Max taker waiting-terms recovery pings/replays per trade.' },
+      waiting_terms_max_wait_ms: { type: 'integer', minimum: 5000, maximum: 3600000, description: 'Max taker wait for TERMS before timeout handling starts.' },
+      waiting_terms_leave_on_timeout: { type: 'boolean', description: 'Whether taker auto-leaves stale swap channel after waiting-terms timeout.' },
+      trace_enabled: { type: 'boolean', description: 'Enable verbose in-worker trace events (disabled by default).' },
       ln_liquidity_mode: { type: 'string', enum: ['single_channel', 'aggregate'] },
       usdt_mint: base58Param,
       enable_quote_from_offers: { type: 'boolean' },
@@ -709,6 +723,20 @@ export const INTERCOMSWAP_TOOLS = [
       terms_hash_hex: { type: 'string', minLength: 64, maxLength: 64, pattern: '^[0-9a-fA-F]{64}$' },
     },
     required: ['channel', 'trade_id', 'terms_hash_hex'],
+  }),
+  tool('intercomswap_swap_status_post', 'Post signed STATUS envelope inside swap:<id> (informational; used for liveness handshakes).', {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      channel: channelParam,
+      trade_id: { type: 'string', minLength: 1, maxLength: 128 },
+      state: {
+        type: 'string',
+        enum: ['init', 'terms', 'accepted', 'invoice', 'escrow', 'ln_paid', 'claimed', 'refunded', 'canceled'],
+      },
+      note: { type: 'string', minLength: 1, maxLength: 500 },
+    },
+    required: ['channel', 'trade_id', 'state'],
   }),
   tool(
     'intercomswap_terms_accept_from_terms',

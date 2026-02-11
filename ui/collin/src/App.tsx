@@ -304,6 +304,13 @@ function App() {
 
   const [preflight, setPreflight] = useState<any>(null);
   const [preflightBusy, setPreflightBusy] = useState(false);
+  const [tradeAutoTraceEnabled, setTradeAutoTraceEnabled] = useState<boolean>(() => {
+    try {
+      return String(window.localStorage.getItem('collin_tradeauto_trace_enabled') || '') === '1';
+    } catch (_e) {
+      return false;
+    }
+  });
   const [envInfo, setEnvInfo] = useState<any>(null);
   const [envBusy, setEnvBusy] = useState(false);
   const [envErr, setEnvErr] = useState<string | null>(null);
@@ -441,6 +448,12 @@ function App() {
       window.localStorage.setItem('collin_show_dismissed_invites', showDismissedInvites ? '1' : '0');
     } catch (_e) {}
   }, [showDismissedInvites]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('collin_tradeauto_trace_enabled', tradeAutoTraceEnabled ? '1' : '0');
+    } catch (_e) {}
+  }, [tradeAutoTraceEnabled]);
 
   useEffect(() => {
     try {
@@ -1824,8 +1837,14 @@ function App() {
 	        pushToast('success', 'Stack started');
 	      }
 
-	      // Refresh status and auto-connect the sidechannel stream once SC-Bridge is up.
-	      await refreshPreflight();
+      if (tradeAutoTraceEnabled) {
+        try {
+          await runToolFinal('intercomswap_tradeauto_trace_set', { trace_enabled: true }, { auto_approve: true });
+        } catch (_e) {}
+      }
+
+      // Refresh status and auto-connect the sidechannel stream once SC-Bridge is up.
+      await refreshPreflight({ includeTradeAuto: tradeAutoTraceEnabled });
 	      if (!scConnected && !scConnecting && scStreamWantedRef.current) {
 	        await new Promise((r) => setTimeout(r, 250));
 	        void startScStream();
@@ -1876,9 +1895,10 @@ function App() {
         .slice(0, 64);
       await runToolFinal('intercomswap_tradeauto_start', {
         channels: channels.length > 0 ? channels : ['0000intercomswapbtcusdt'],
+        trace_enabled: tradeAutoTraceEnabled,
       }, { auto_approve: true });
       pushToast('success', 'Trade automation worker started');
-      await refreshPreflight();
+      await refreshPreflight({ includeTradeAuto: tradeAutoTraceEnabled });
     } catch (e: any) {
       const msg = e?.message || String(e);
       setRunErr(msg);
@@ -1895,11 +1915,29 @@ function App() {
     try {
       await runToolFinal('intercomswap_tradeauto_stop', { reason: 'manual_stop' }, { auto_approve: true });
       pushToast('success', 'Trade automation worker stopped');
-      await refreshPreflight();
+      await refreshPreflight({ includeTradeAuto: tradeAutoTraceEnabled });
     } catch (e: any) {
       const msg = e?.message || String(e);
       setRunErr(msg);
       pushToast('error', `Trade worker stop failed: ${msg}`);
+    } finally {
+      setRunBusy(false);
+    }
+  }
+
+  async function setTradeAutoTraceMode(next: boolean) {
+    if (runBusy || stackOpBusy) return;
+    setRunBusy(true);
+    setRunErr(null);
+    try {
+      await runToolFinal('intercomswap_tradeauto_trace_set', { trace_enabled: next }, { auto_approve: true });
+      setTradeAutoTraceEnabled(next);
+      pushToast('success', `Trade trace ${next ? 'enabled' : 'disabled'}`);
+      await refreshPreflight({ includeTradeAuto: next });
+    } catch (e: any) {
+      const msg = e?.message || String(e);
+      setRunErr(msg);
+      pushToast('error', `Trade trace toggle failed: ${msg}`);
     } finally {
       setRunBusy(false);
     }
@@ -2101,7 +2139,7 @@ function App() {
       await runToolFinal('intercomswap_ln_unlock', {}, { auto_approve: true });
       setLnFundingAddrErr(null);
       pushToast('success', 'Lightning wallet unlocked');
-      await refreshPreflight();
+      await refreshPreflight({ includeTradeAuto: tradeAutoTraceEnabled });
     } catch (err: any) {
       pushToast('error', err?.message || String(err));
     }
@@ -2919,9 +2957,10 @@ function App() {
     }
   }
 
-  async function refreshPreflight() {
+  async function refreshPreflight(opts: { includeTradeAuto?: boolean } = {}) {
     setPreflightBusy(true);
     const out: any = { ts: Date.now() };
+    const includeTradeAuto = opts.includeTradeAuto ?? tradeAutoTraceEnabled;
     try {
       out.env = await runDirectToolOnce('intercomswap_env_get', {}, { auto_approve: false });
       setEnvInfo(out.env);
@@ -2956,10 +2995,14 @@ function App() {
     } catch (e: any) {
       out.autopost_error = e?.message || String(e);
     }
-    try {
-      out.tradeauto = await runDirectToolOnce('intercomswap_tradeauto_status', {}, { auto_approve: false });
-    } catch (e: any) {
-      out.tradeauto_error = e?.message || String(e);
+    out.tradeauto = null;
+    out.tradeauto_error = null;
+    if (includeTradeAuto) {
+      try {
+        out.tradeauto = await runDirectToolOnce('intercomswap_tradeauto_status', {}, { auto_approve: false });
+      } catch (e: any) {
+        out.tradeauto_error = e?.message || String(e);
+      }
     }
     try {
       out.ln_info = await runDirectToolOnce('intercomswap_ln_info', {}, { auto_approve: false });
@@ -3647,7 +3690,7 @@ function App() {
     }, intervalMs);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [health?.ok, stackAnyRunning, stackGate.ok]);
+  }, [health?.ok, stackAnyRunning, stackGate.ok, tradeAutoTraceEnabled]);
 
   useEffect(() => {
     const ok = Boolean(stackGate.ok);
@@ -4044,7 +4087,7 @@ function App() {
               ) : null}
 
               <div className="row">
-                <button className="btn primary" onClick={refreshPreflight} disabled={preflightBusy}>
+                <button className="btn primary" onClick={() => void refreshPreflight()} disabled={preflightBusy}>
                   {preflightBusy ? 'Checking…' : 'Refresh status'}
                 </button>
                 <button className="btn" onClick={() => setActiveTab('wallets')}>
@@ -4103,7 +4146,7 @@ function App() {
                     </button>
                   ) : null}
                   {!solConfigOk && solKind === 'local' && solLocalUp ? (
-                    <button className="btn" onClick={refreshPreflight} disabled={preflightBusy}>
+                    <button className="btn" onClick={() => void refreshPreflight()} disabled={preflightBusy}>
                       Retry Solana config
                     </button>
                   ) : null}
@@ -4257,9 +4300,16 @@ function App() {
 
             <Panel title="Trade Automation Trace (Backend)">
               <div className="row">
-                <span className={`chip ${tradeAutoStatus?.running ? 'hi' : 'warn'}`}>
-                  {tradeAutoStatus?.running ? 'running' : 'stopped'}
+                <span className={`chip ${tradeAutoTraceEnabled ? 'hi' : 'warn'}`}>
+                  {tradeAutoTraceEnabled ? 'trace on' : 'trace off'}
                 </span>
+                <button
+                  className={`btn ${tradeAutoTraceEnabled ? 'ghost' : 'primary'}`}
+                  onClick={() => void setTradeAutoTraceMode(!tradeAutoTraceEnabled)}
+                  disabled={runBusy || stackOpBusy}
+                >
+                  {tradeAutoTraceEnabled ? 'Disable trace' : 'Enable trace'}
+                </button>
                 {tradeAutoStatus?.running ? (
                   <button className="btn ghost" onClick={() => void tradeAutoStopManual()} disabled={runBusy || stackOpBusy}>
                     Stop worker
@@ -4279,64 +4329,73 @@ function App() {
                   <span className="chip">last tick: {msToUtcIso(Number(tradeAutoStatus.stats.last_tick_at))}</span>
                 ) : null}
               </div>
-              {preflight?.tradeauto_error ? (
+              {!tradeAutoTraceEnabled ? (
+                <div className="muted small" style={{ marginTop: 6 }}>
+                  Trace polling is disabled by default. Enable trace only when debugging settlement issues.
+                </div>
+              ) : null}
+              {tradeAutoTraceEnabled && preflight?.tradeauto_error ? (
                 <div className="alert bad" style={{ marginTop: 8 }}>
                   tradeauto_status: {String(preflight.tradeauto_error)}
                 </div>
               ) : null}
-              {tradeAutoStatus?.stats?.last_error ? (
+              {tradeAutoTraceEnabled && tradeAutoStatus?.stats?.last_error ? (
                 <div className="alert warn" style={{ marginTop: 8 }}>
                   last error: {String(tradeAutoStatus.stats.last_error)}
                 </div>
               ) : null}
-              <div className="muted small" style={{ marginTop: 6 }}>
-                backend trace from <span className="mono">intercomswap_tradeauto_status</span> (newest first)
-              </div>
-              <VirtualList
-                items={tradeAutoRecent}
-                itemKey={(e) => `${e.ts || 0}:${e.type}:${e.stage || ''}:${e.trade_id || ''}:${e._idx}`}
-                estimatePx={84}
-                render={(e: any) => (
-                  <div className="rowitem">
-                    <div className="rowitem-top">
-                      <span className="mono chip">{String(e.type || 'trace')}</span>
-                      <span className="mono dim">{typeof e.ts === 'number' ? msToUtcIso(e.ts) : '—'}</span>
-                    </div>
-                    <div className="rowitem-mid">
-                      {e.trade_id ? (
-                        <div>
-                          trade: <span className="mono">{String(e.trade_id)}</span>
-                        </div>
-                      ) : null}
-                      {e.stage ? (
-                        <div>
-                          stage: <span className="mono">{String(e.stage)}</span>
-                        </div>
-                      ) : null}
-                      {e.channel ? (
-                        <div>
-                          channel: <span className="mono">{String(e.channel)}</span>
-                        </div>
-                      ) : null}
-                      {e.sig ? (
-                        <div>
-                          sig: <span className="mono">{String(e.sig)}</span>
-                        </div>
-                      ) : null}
-                      {typeof e.cooldown_ms === 'number' ? (
-                        <div>
-                          retry: <span className="mono">{Math.trunc(e.cooldown_ms)} ms</span>
-                        </div>
-                      ) : null}
-                      {e.error ? (
-                        <div className="mono" style={{ color: 'var(--bad)', whiteSpace: 'pre-wrap' }}>
-                          {String(e.error)}
-                        </div>
-                      ) : null}
-                    </div>
+              {tradeAutoTraceEnabled ? (
+                <>
+                  <div className="muted small" style={{ marginTop: 6 }}>
+                    backend trace from <span className="mono">intercomswap_tradeauto_status</span> (newest first)
                   </div>
-                )}
-              />
+                  <VirtualList
+                    items={tradeAutoRecent}
+                    itemKey={(e) => `${e.ts || 0}:${e.type}:${e.stage || ''}:${e.trade_id || ''}:${e._idx}`}
+                    estimatePx={84}
+                    render={(e: any) => (
+                      <div className="rowitem">
+                        <div className="rowitem-top">
+                          <span className="mono chip">{String(e.type || 'trace')}</span>
+                          <span className="mono dim">{typeof e.ts === 'number' ? msToUtcIso(e.ts) : '—'}</span>
+                        </div>
+                        <div className="rowitem-mid">
+                          {e.trade_id ? (
+                            <div>
+                              trade: <span className="mono">{String(e.trade_id)}</span>
+                            </div>
+                          ) : null}
+                          {e.stage ? (
+                            <div>
+                              stage: <span className="mono">{String(e.stage)}</span>
+                            </div>
+                          ) : null}
+                          {e.channel ? (
+                            <div>
+                              channel: <span className="mono">{String(e.channel)}</span>
+                            </div>
+                          ) : null}
+                          {e.sig ? (
+                            <div>
+                              sig: <span className="mono">{String(e.sig)}</span>
+                            </div>
+                          ) : null}
+                          {typeof e.cooldown_ms === 'number' ? (
+                            <div>
+                              retry: <span className="mono">{Math.trunc(e.cooldown_ms)} ms</span>
+                            </div>
+                          ) : null}
+                          {e.error ? (
+                            <div className="mono" style={{ color: 'var(--bad)', whiteSpace: 'pre-wrap' }}>
+                              {String(e.error)}
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    )}
+                  />
+                </>
+              ) : null}
             </Panel>
           </div>
         ) : null}

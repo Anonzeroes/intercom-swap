@@ -1306,6 +1306,13 @@ export class ToolExecutor {
       assertAllowedKeys(args, toolName, []);
       return this._tradeAuto.status();
     }
+    if (toolName === 'intercomswap_tradeauto_trace_set') {
+      assertAllowedKeys(args, toolName, ['trace_enabled']);
+      requireApproval(toolName, autoApprove);
+      const traceEnabled = expectBool(args, toolName, 'trace_enabled');
+      if (dryRun) return { type: 'dry_run', tool: toolName, trace_enabled: traceEnabled };
+      return this._tradeAuto.setTraceEnabled(traceEnabled);
+    }
     if (toolName === 'intercomswap_tradeauto_start') {
       assertAllowedKeys(args, toolName, [
         'channels',
@@ -1322,6 +1329,12 @@ export class ToolExecutor {
         'terms_replay_max',
         'swap_auto_leave_cooldown_ms',
         'swap_auto_leave_max_attempts',
+        'waiting_terms_trace_cooldown_ms',
+        'waiting_terms_ping_cooldown_ms',
+        'waiting_terms_max_pings',
+        'waiting_terms_max_wait_ms',
+        'waiting_terms_leave_on_timeout',
+        'trace_enabled',
         'ln_liquidity_mode',
         'usdt_mint',
         'enable_quote_from_offers',
@@ -1359,6 +1372,12 @@ export class ToolExecutor {
       const termsReplayMax = expectOptionalInt(args, toolName, 'terms_replay_max', { min: 1, max: 500 });
       const swapAutoLeaveCooldownMs = expectOptionalInt(args, toolName, 'swap_auto_leave_cooldown_ms', { min: 1_000, max: 120_000 });
       const swapAutoLeaveMaxAttempts = expectOptionalInt(args, toolName, 'swap_auto_leave_max_attempts', { min: 1, max: 50 });
+      const waitingTermsTraceCooldownMs = expectOptionalInt(args, toolName, 'waiting_terms_trace_cooldown_ms', { min: 1_000, max: 120_000 });
+      const waitingTermsPingCooldownMs = expectOptionalInt(args, toolName, 'waiting_terms_ping_cooldown_ms', { min: 1_000, max: 120_000 });
+      const waitingTermsMaxPings = expectOptionalInt(args, toolName, 'waiting_terms_max_pings', { min: 0, max: 500 });
+      const waitingTermsMaxWaitMs = expectOptionalInt(args, toolName, 'waiting_terms_max_wait_ms', { min: 5_000, max: 60 * 60 * 1000 });
+      const waitingTermsLeaveOnTimeout = 'waiting_terms_leave_on_timeout' in args ? expectBool(args, toolName, 'waiting_terms_leave_on_timeout') : undefined;
+      const traceEnabled = 'trace_enabled' in args ? expectBool(args, toolName, 'trace_enabled') : undefined;
       const lnLiquidityModeRaw = expectOptionalString(args, toolName, 'ln_liquidity_mode', { min: 1, max: 32 });
       const lnLiquidityMode = lnLiquidityModeRaw ? String(lnLiquidityModeRaw).trim().toLowerCase() : '';
       if (lnLiquidityMode && lnLiquidityMode !== 'aggregate' && lnLiquidityMode !== 'single_channel') {
@@ -1389,6 +1408,12 @@ export class ToolExecutor {
         ...(termsReplayMax !== null ? { terms_replay_max: termsReplayMax } : {}),
         ...(swapAutoLeaveCooldownMs !== null ? { swap_auto_leave_cooldown_ms: swapAutoLeaveCooldownMs } : {}),
         ...(swapAutoLeaveMaxAttempts !== null ? { swap_auto_leave_max_attempts: swapAutoLeaveMaxAttempts } : {}),
+        ...(waitingTermsTraceCooldownMs !== null ? { waiting_terms_trace_cooldown_ms: waitingTermsTraceCooldownMs } : {}),
+        ...(waitingTermsPingCooldownMs !== null ? { waiting_terms_ping_cooldown_ms: waitingTermsPingCooldownMs } : {}),
+        ...(waitingTermsMaxPings !== null ? { waiting_terms_max_pings: waitingTermsMaxPings } : {}),
+        ...(waitingTermsMaxWaitMs !== null ? { waiting_terms_max_wait_ms: waitingTermsMaxWaitMs } : {}),
+        ...(waitingTermsLeaveOnTimeout !== undefined ? { waiting_terms_leave_on_timeout: waitingTermsLeaveOnTimeout } : {}),
+        ...(traceEnabled !== undefined ? { trace_enabled: traceEnabled } : {}),
         ...(lnLiquidityMode ? { ln_liquidity_mode: lnLiquidityMode } : {}),
         ...(usdtMint ? { usdt_mint: usdtMint } : {}),
         ...(enableQuote !== undefined ? { enable_quote_from_offers: enableQuote } : {}),
@@ -3491,6 +3516,37 @@ export class ToolExecutor {
       } finally {
         store.close();
       }
+    }
+
+    if (toolName === 'intercomswap_swap_status_post') {
+      assertAllowedKeys(args, toolName, ['channel', 'trade_id', 'state', 'note']);
+      requireApproval(toolName, autoApprove);
+      const channel = normalizeChannelName(expectString(args, toolName, 'channel', { max: 128 }));
+      const tradeId = expectString(args, toolName, 'trade_id', { min: 1, max: 128, pattern: /^[A-Za-z0-9_.:-]+$/ });
+      const state = expectString(args, toolName, 'state', {
+        min: 1,
+        max: 32,
+        pattern: /^(init|terms|accepted|invoice|escrow|ln_paid|claimed|refunded|canceled)$/i,
+      }).toLowerCase();
+      const note = expectOptionalString(args, toolName, 'note', { min: 1, max: 500 });
+
+      const unsigned = createUnsignedEnvelope({
+        v: 1,
+        kind: KIND.STATUS,
+        tradeId,
+        body: {
+          state,
+          ...(note ? { note } : {}),
+        },
+      });
+      if (dryRun) return { type: 'dry_run', tool: toolName, channel, trade_id: tradeId, state };
+
+      const signing = await this._requirePeerSigning();
+      return withScBridge(this.scBridge, async (sc) => {
+        const signed = signSwapEnvelope(unsigned, signing);
+        await this._sendEnvelopeLogged(sc, channel, signed);
+        return { type: 'status_posted', channel, trade_id: tradeId, state, envelope: signed };
+      });
     }
 
     if (toolName === 'intercomswap_terms_accept_from_terms') {

@@ -170,6 +170,7 @@ export class TradeAutoManager {
     this.opts = null;
     this._timer = null;
     this._tickInFlight = false;
+    this._traceEnabled = false;
 
     this._lastSeq = 0;
     this._events = [];
@@ -201,7 +202,7 @@ export class TradeAutoManager {
     this._swapAutoLeaveByTrade = new Map(); // trade_id -> { attempts, nextAtMs, lastTs }
     this._cachedLocalPeer = '';
     this._cachedLocalSolSigner = '';
-    this._waitingTermsTraceAt = new Map(); // trade_id -> ts
+    this._waitingTermsState = new Map(); // trade_id -> { firstSeenAt,lastTs,lastTraceAt,lastPingAt,nextPingAt,pings,timedOutAt }
 
     this._stats = {
       ticks: 0,
@@ -221,6 +222,7 @@ export class TradeAutoManager {
   }
 
   _trace(type, details = {}) {
+    if (!this._traceEnabled) return;
     try {
       const evt = {
         ts: Date.now(),
@@ -255,6 +257,7 @@ export class TradeAutoManager {
       running: this.running,
       options: this.opts || null,
       stats: { ...this._stats },
+      trace_enabled: Boolean(this._traceEnabled),
       memory: {
         events: this._events.length,
         auto_quoted_rfq_sig: this._autoQuotedRfqSig.size,
@@ -269,10 +272,19 @@ export class TradeAutoManager {
         not_owner_trace_at: this._notOwnerTraceAt.size,
         terms_replay_by_trade: this._termsReplayByTrade.size,
         swap_auto_leave_by_trade: this._swapAutoLeaveByTrade.size,
-        waiting_terms_trace_at: this._waitingTermsTraceAt.size,
+        waiting_terms_state: this._waitingTermsState.size,
         debug_events: this._debugEvents.length,
       },
       recent_events: this._debugEvents.slice(-Math.min(200, this._debugMax)),
+    };
+  }
+
+  setTraceEnabled(enabled) {
+    this._traceEnabled = enabled === true;
+    return {
+      type: 'tradeauto_trace_set',
+      running: this.running,
+      trace_enabled: this._traceEnabled,
     };
   }
 
@@ -359,6 +371,28 @@ export class TradeAutoManager {
       max: 50,
       fallback: 10,
     });
+    const waitingTermsTraceCooldownMs = clampInt(toIntOrNull(opts.waiting_terms_trace_cooldown_ms), {
+      min: 1_000,
+      max: 120_000,
+      fallback: 15_000,
+    });
+    const waitingTermsPingCooldownMs = clampInt(toIntOrNull(opts.waiting_terms_ping_cooldown_ms), {
+      min: 1_000,
+      max: 120_000,
+      fallback: 6_000,
+    });
+    const waitingTermsMaxPings = clampInt(toIntOrNull(opts.waiting_terms_max_pings), {
+      min: 0,
+      max: 500,
+      fallback: 40,
+    });
+    const waitingTermsMaxWaitMs = clampInt(toIntOrNull(opts.waiting_terms_max_wait_ms), {
+      min: 5_000,
+      max: 60 * 60 * 1000,
+      fallback: 3 * 60 * 1000,
+    });
+    const waitingTermsLeaveOnTimeout = opts.waiting_terms_leave_on_timeout !== false;
+    const traceEnabled = opts.trace_enabled === true;
 
     const lnLiquidityModeRaw = String(opts.ln_liquidity_mode || 'aggregate').trim().toLowerCase();
     const lnLiquidityMode = lnLiquidityModeRaw === 'single_channel' ? 'single_channel' : 'aggregate';
@@ -385,6 +419,12 @@ export class TradeAutoManager {
       terms_replay_max: termsReplayMax,
       swap_auto_leave_cooldown_ms: swapAutoLeaveCooldownMs,
       swap_auto_leave_max_attempts: swapAutoLeaveMaxAttempts,
+      waiting_terms_trace_cooldown_ms: waitingTermsTraceCooldownMs,
+      waiting_terms_ping_cooldown_ms: waitingTermsPingCooldownMs,
+      waiting_terms_max_pings: waitingTermsMaxPings,
+      waiting_terms_max_wait_ms: waitingTermsMaxWaitMs,
+      waiting_terms_leave_on_timeout: waitingTermsLeaveOnTimeout,
+      trace_enabled: traceEnabled,
       ln_liquidity_mode: lnLiquidityMode,
       usdt_mint: usdtMint || null,
       enable_quote_from_offers: opts.enable_quote_from_offers !== false,
@@ -407,6 +447,7 @@ export class TradeAutoManager {
     this._debugMax = debugMax;
     this._debugEvents = [];
     this._toolTimeoutMs = toolTimeoutMs;
+    this._traceEnabled = traceEnabled;
     this._scEnsureIntervalMs = scEnsureIntervalMs;
     this._nextScEnsureAt = 0;
     this._hygieneIntervalMs = hygieneIntervalMs;
@@ -425,7 +466,7 @@ export class TradeAutoManager {
     this._swapAutoLeaveByTrade.clear();
     this._cachedLocalPeer = '';
     this._cachedLocalSolSigner = '';
-    this._waitingTermsTraceAt.clear();
+    this._waitingTermsState.clear();
 
     this._stats = {
       ticks: 0,
@@ -445,6 +486,12 @@ export class TradeAutoManager {
       terms_replay_max: termsReplayMax,
       swap_auto_leave_cooldown_ms: swapAutoLeaveCooldownMs,
       swap_auto_leave_max_attempts: swapAutoLeaveMaxAttempts,
+      waiting_terms_trace_cooldown_ms: waitingTermsTraceCooldownMs,
+      waiting_terms_ping_cooldown_ms: waitingTermsPingCooldownMs,
+      waiting_terms_max_pings: waitingTermsMaxPings,
+      waiting_terms_max_wait_ms: waitingTermsMaxWaitMs,
+      waiting_terms_leave_on_timeout: waitingTermsLeaveOnTimeout,
+      trace_enabled: traceEnabled,
     });
 
     await this._runToolWithTimeout(
@@ -488,7 +535,8 @@ export class TradeAutoManager {
     this._swapAutoLeaveByTrade.clear();
     this._cachedLocalPeer = '';
     this._cachedLocalSolSigner = '';
-    this._waitingTermsTraceAt.clear();
+    this._waitingTermsState.clear();
+    this._traceEnabled = false;
     this._trace('tradeauto_stop', { reason: String(reason || 'stopped') });
     return { type: 'tradeauto_stopped', reason: String(reason || 'stopped'), ...this.status() };
   }
@@ -549,7 +597,7 @@ export class TradeAutoManager {
     this._tradePreimage.delete(tradeId);
     this._termsReplayByTrade.delete(tradeId);
     this._swapAutoLeaveByTrade.delete(tradeId);
-    this._waitingTermsTraceAt.delete(tradeId);
+    this._waitingTermsState.delete(tradeId);
     const prefix = `${tradeId}:`;
     for (const key of Array.from(this._stageDone.keys())) {
       if (String(key).startsWith(prefix)) this._stageDone.delete(key);
@@ -617,10 +665,11 @@ export class TradeAutoManager {
       if (!tradeId || !Number.isFinite(lastTs) || now - lastTs > this._doneMaxAgeMs) this._swapAutoLeaveByTrade.delete(tradeId);
     }
     pruneMapByLimit(this._swapAutoLeaveByTrade, Math.max(this.opts?.max_trades || 120, this._preimageMax));
-    for (const [tradeId, ts] of Array.from(this._waitingTermsTraceAt.entries())) {
-      if (!Number.isFinite(ts) || now - Number(ts) > this._doneMaxAgeMs) this._waitingTermsTraceAt.delete(tradeId);
+    for (const [tradeId, state] of Array.from(this._waitingTermsState.entries())) {
+      const lastTs = Number(state?.lastTs || state?.firstSeenAt || state?.timedOutAt || 0);
+      if (!tradeId || !Number.isFinite(lastTs) || now - lastTs > this._doneMaxAgeMs) this._waitingTermsState.delete(tradeId);
     }
-    pruneMapByLimit(this._waitingTermsTraceAt, Math.max(this.opts?.max_trades || 120, this._preimageMax));
+    pruneMapByLimit(this._waitingTermsState, Math.max(this.opts?.max_trades || 120, this._preimageMax));
   }
 
   _appendEvents(events) {
@@ -1167,6 +1216,10 @@ export class TradeAutoManager {
           const escrowEnv = isObject(tradeCtx?.escrow) ? tradeCtx.escrow : null;
           const lnPaidEnv = isObject(tradeCtx?.ln_paid) ? tradeCtx.ln_paid : null;
 
+          if (termsEnv || acceptEnv || invoiceEnv || escrowEnv || lnPaidEnv) {
+            this._waitingTermsState.delete(tradeId);
+          }
+
           if (acceptEnv && this._termsReplayByTrade.has(tradeId)) {
             this._termsReplayByTrade.delete(tradeId);
           }
@@ -1326,17 +1379,120 @@ export class TradeAutoManager {
           }
 
           if (iAmTaker && !termsEnv) {
-            const last = Number(this._waitingTermsTraceAt.get(tradeId) || 0);
-            if (Date.now() - last > 15_000) {
+            const nowMs = Date.now();
+            const traceCooldownMs = Number(this.opts?.waiting_terms_trace_cooldown_ms ?? 15_000);
+            const pingCooldownMs = Number(this.opts?.waiting_terms_ping_cooldown_ms ?? 6_000);
+            const maxPings = Number(this.opts?.waiting_terms_max_pings ?? 40);
+            const maxWaitMs = Number(this.opts?.waiting_terms_max_wait_ms ?? 3 * 60 * 1000);
+            const leaveOnTimeout = this.opts?.waiting_terms_leave_on_timeout !== false;
+            const state = isObject(this._waitingTermsState.get(tradeId))
+              ? { ...this._waitingTermsState.get(tradeId) }
+              : {
+                  firstSeenAt: nowMs,
+                  lastTs: nowMs,
+                  lastTraceAt: 0,
+                  lastPingAt: 0,
+                  nextPingAt: nowMs,
+                  pings: 0,
+                  timedOutAt: 0,
+                };
+            state.lastTs = nowMs;
+            if (!Number.isFinite(Number(state.firstSeenAt)) || Number(state.firstSeenAt) <= 0) state.firstSeenAt = nowMs;
+            if (!Number.isFinite(Number(state.nextPingAt)) || Number(state.nextPingAt) <= 0) state.nextPingAt = nowMs;
+            if (!Number.isFinite(Number(state.pings)) || Number(state.pings) < 0) state.pings = 0;
+            const waitMs = Math.max(0, nowMs - Number(state.firstSeenAt || nowMs));
+
+            if (nowMs - Number(state.lastTraceAt || 0) > traceCooldownMs) {
               this._trace('waiting_terms', {
                 trade_id: tradeId,
                 channel: swapChannel,
+                wait_ms: waitMs,
+                pings: Number(state.pings || 0),
                 has_invite: Boolean(isObject(neg?.swap_invite)),
                 has_quote_accept: Boolean(isObject(quoteAcceptEnv)),
                 has_rfq: Boolean(isObject(rfqEnv)),
               });
-              this._waitingTermsTraceAt.set(tradeId, Date.now());
+              state.lastTraceAt = nowMs;
             }
+
+            const timedOut = waitMs >= maxWaitMs;
+            if (timedOut && !Number(state.timedOutAt || 0)) {
+              state.timedOutAt = nowMs;
+              this._autoAcceptedTradeLock.delete(tradeId);
+              this._trace('waiting_terms_timeout', {
+                trade_id: tradeId,
+                channel: swapChannel,
+                wait_ms: waitMs,
+                max_wait_ms: maxWaitMs,
+              });
+            }
+
+            if (!timedOut && Number(state.pings || 0) < maxPings && nowMs >= Number(state.nextPingAt || 0)) {
+              try {
+                if (isObject(quoteAcceptEnv)) {
+                  await this._runToolWithTimeout(
+                    { tool: 'intercomswap_sc_send_json', args: { channel: swapChannel, json: quoteAcceptEnv } },
+                    { timeoutMs: Math.min(this._toolTimeoutMs, 10_000), label: 'tradeauto_waiting_terms_replay_accept' }
+                  );
+                  this._trace('waiting_terms_replay_accept_ok', {
+                    trade_id: tradeId,
+                    channel: swapChannel,
+                    attempt: Number(state.pings || 0) + 1,
+                  });
+                } else {
+                  await this._runToolWithTimeout(
+                    {
+                      tool: 'intercomswap_swap_status_post',
+                      args: { channel: swapChannel, trade_id: tradeId, state: 'init', note: 'waiting_terms' },
+                    },
+                    { timeoutMs: Math.min(this._toolTimeoutMs, 10_000), label: 'tradeauto_waiting_terms_status_ping' }
+                  );
+                  this._trace('waiting_terms_status_ping_ok', {
+                    trade_id: tradeId,
+                    channel: swapChannel,
+                    attempt: Number(state.pings || 0) + 1,
+                  });
+                }
+                state.pings = Number(state.pings || 0) + 1;
+                state.lastPingAt = nowMs;
+                state.nextPingAt = nowMs + pingCooldownMs;
+                actionsLeft -= 1;
+                this._stats.actions += 1;
+              } catch (err) {
+                state.pings = Number(state.pings || 0) + 1;
+                state.lastPingAt = nowMs;
+                state.nextPingAt = nowMs + pingCooldownMs;
+                this._trace('waiting_terms_ping_fail', {
+                  trade_id: tradeId,
+                  channel: swapChannel,
+                  attempt: Number(state.pings || 0),
+                  error: err?.message || String(err),
+                });
+              }
+            }
+
+            if (timedOut && leaveOnTimeout) {
+              const stageKey = `${tradeId}:waiting_terms_timeout_leave`;
+              if (this._canRunStage(stageKey)) {
+                this._markStageInFlight(stageKey);
+                try {
+                  await this._runToolWithTimeout(
+                    { tool: 'intercomswap_sc_leave', args: { channel: swapChannel } },
+                    { timeoutMs: Math.min(this._toolTimeoutMs, 10_000), label: 'tradeauto_waiting_terms_leave' }
+                  );
+                  this._markStageSuccess(stageKey);
+                  this._trace('waiting_terms_leave_ok', { trade_id: tradeId, channel: swapChannel });
+                } catch (err) {
+                  this._markStageRetry(stageKey, Math.max(1_000, Number(this.opts?.swap_auto_leave_cooldown_ms || 10_000)));
+                  this._trace('waiting_terms_leave_fail', {
+                    trade_id: tradeId,
+                    channel: swapChannel,
+                    error: err?.message || String(err),
+                  });
+                }
+              }
+            }
+            this._waitingTermsState.set(tradeId, state);
             continue;
           }
 

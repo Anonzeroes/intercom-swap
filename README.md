@@ -690,7 +690,11 @@ Recently added/changed tools and guardrails:
 - `intercomswap_quote_accept`: embeds a signed best-effort `ln_liquidity_hint` in the accept envelope.
 - `intercomswap_swap_invite_from_accept`: optional `quote_envelope` argument enables stricter quote/hash cross-check plus best-effort taker liquidity hint validation before inviting.
 - `intercomswap_tradeauto_start` / `intercomswap_tradeauto_status` / `intercomswap_tradeauto_stop`: backend multi-trade automation worker (quote/accept/invite/join/settlement orchestration).
+  - trace defaults: worker trace is OFF by default; toggle explicitly with `intercomswap_tradeauto_trace_set`.
   - reliability knobs: `tool_timeout_ms` (per-tool timeout inside worker), `sc_ensure_interval_ms` (periodic SC subscribe/reconnect keepalive).
+  - waiting-terms liveness knobs: `waiting_terms_*` options bound waiting-time, replay/ping cadence, and timeout leave behavior.
+- `intercomswap_tradeauto_trace_set`: enable/disable backend trace emission at runtime without restarting the full stack.
+- `intercomswap_swap_status_post`: signed status/liveness envelope helper for swap channels.
 - `intercomswap_stack_start`: now auto-starts backend trade automation (rendezvous channels + settlement stages) and reports worker status/errors.
 - `intercomswap_stack_stop`: now also stops backend trade automation.
 - Autopost safety: jobs stop on insufficient-funds/liquidity errors (in addition to expiry/fill stops).
