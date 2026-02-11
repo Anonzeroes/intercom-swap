@@ -212,6 +212,28 @@ function deriveScEventDedupKey(evt: any): string {
   return `evt:${channel}:${kind}:${tradeId}:${ts}`;
 }
 
+const SC_UI_KIND_ALLOWLIST = new Set<string>([
+  'swap.rfq',
+  'swap.svc_announce',
+  'swap.quote',
+  'swap.accept',
+  'swap.swap_invite',
+  'swap.trade_lock',
+  'swap.ln_paid',
+  'swap.sol_claimed',
+  'swap.sol_refunded',
+  'swap.cancel',
+]);
+
+function shouldKeepScEventInUi(evt: any): boolean {
+  if (!evt || typeof evt !== 'object') return false;
+  const t = String((evt as any).type || '').trim();
+  if (t !== 'sc_event') return true;
+  const kind = String((evt as any).kind || (evt as any)?.message?.kind || '').trim();
+  if (!kind) return false;
+  return SC_UI_KIND_ALLOWLIST.has(kind);
+}
+
 function isSwapTradeChannelName(raw: any): boolean {
   const ch = String(raw || '').trim().toLowerCase();
   return ch.startsWith('swap:');
@@ -2225,23 +2247,46 @@ function App() {
     role,
     lines,
     actionLabel,
+    lnSummaryOverride,
   }: {
     role: 'send' | 'receive';
     lines: Array<{ btc_sats: number }>;
     actionLabel: string;
+    lnSummaryOverride?: any;
   }): boolean {
+    const lnSummary =
+      lnSummaryOverride && typeof lnSummaryOverride === 'object'
+        ? lnSummaryOverride
+        : preflight && typeof preflight === 'object'
+          ? (preflight as any).ln_summary
+          : null;
     const required = lines
       .map((l) => Number(l?.btc_sats || 0))
       .filter((n) => Number.isInteger(n) && n > 0)
       .sort((a, b) => b - a);
     if (required.length < 1) return true;
-    if (lnActiveChannelCount < 1) {
+    const lnActiveChannelCountNow = Number((lnSummary as any)?.channels_active || 0);
+    if (lnActiveChannelCountNow < 1) {
       pushToast('error', `${actionLabel}: no active Lightning channels`);
       return false;
     }
 
-    const maxSingle = role === 'send' ? lnMaxOutboundSats : lnMaxInboundSats;
-    const total = role === 'send' ? lnTotalOutboundSats : lnTotalInboundSats;
+    const maxSingle =
+      role === 'send'
+        ? typeof (lnSummary as any)?.max_outbound_sats === 'number'
+          ? (lnSummary as any).max_outbound_sats
+          : null
+        : typeof (lnSummary as any)?.max_inbound_sats === 'number'
+          ? (lnSummary as any).max_inbound_sats
+          : null;
+    const total =
+      role === 'send'
+        ? typeof (lnSummary as any)?.total_outbound_sats === 'number'
+          ? (lnSummary as any).total_outbound_sats
+          : null
+        : typeof (lnSummary as any)?.total_inbound_sats === 'number'
+          ? (lnSummary as any).total_inbound_sats
+          : null;
     const roleLabel = role === 'send' ? 'outbound' : 'inbound';
     const rawNeeded = required[0];
     const lnFeeBuffer = role === 'send' ? Math.max(LN_ROUTE_FEE_BUFFER_MIN_SATS, Math.ceil(rawNeeded * (LN_ROUTE_FEE_BUFFER_BPS / 10_000))) : 0;
@@ -2276,12 +2321,17 @@ function App() {
     lines,
     maxTotalFeeBps,
     actionLabel,
+    usdtAvailableOverrideAtomic,
   }: {
     lines: Array<{ btc_sats: number; usdt_amount: string }>;
     maxTotalFeeBps: number;
     actionLabel: string;
+    usdtAvailableOverrideAtomic?: bigint | null;
   }): boolean {
-    const usdtAvailableAtomic = parseAtomicBigInt((preflight as any)?.sol_usdt?.amount ?? walletUsdtAtomic);
+    const usdtAvailableAtomic =
+      typeof usdtAvailableOverrideAtomic === 'bigint'
+        ? usdtAvailableOverrideAtomic
+        : parseAtomicBigInt(walletUsdtAtomic) ?? parseAtomicBigInt((preflight as any)?.sol_usdt?.amount);
     if (usdtAvailableAtomic === null) {
       pushToast('error', `${actionLabel}: USDT wallet balance unavailable (refresh status first)`);
       return false;
@@ -2319,6 +2369,82 @@ function App() {
       }
     }
     return true;
+  }
+
+  async function fetchFreshTradeGuardrailSnapshot({
+    needLn,
+    needUsdt,
+  }: {
+    needLn: boolean;
+    needUsdt: boolean;
+  }): Promise<{ lnSummary?: any; usdtAvailableAtomic?: bigint | null }> {
+    const out: { lnSummary?: any; usdtAvailableAtomic?: bigint | null } = {};
+    const tasks: Promise<void>[] = [];
+
+    if (needLn) {
+      tasks.push(
+        (async () => {
+          try {
+            const [listfunds, listchannels] = await Promise.all([
+              runDirectToolOnce('intercomswap_ln_listfunds', {}, { auto_approve: false }),
+              runDirectToolOnce('intercomswap_ln_listchannels', {}, { auto_approve: false }),
+            ]);
+            const impl = String((envInfo as any)?.ln?.impl || (preflight as any)?.env?.ln?.impl || (preflight as any)?.ln_info?.implementation || '');
+            const lnSummary = summarizeLn(listfunds, listchannels, impl);
+            out.lnSummary = lnSummary;
+            setPreflight((prev: any) =>
+              prev && typeof prev === 'object'
+                ? {
+                    ...prev,
+                    ln_listfunds: listfunds,
+                    ln_channels: listchannels,
+                    ln_summary: lnSummary,
+                  }
+                : prev
+            );
+          } catch (_e) {}
+        })()
+      );
+    }
+
+    if (needUsdt) {
+      tasks.push(
+        (async () => {
+          const owner = String(solSignerPubkey || '').trim();
+          const mint = String(walletUsdtMint || '').trim();
+          if (!owner || !mint) return;
+          try {
+            const bal = await runDirectToolOnce(
+              'intercomswap_sol_token_balance',
+              { owner, mint },
+              { auto_approve: false }
+            );
+            const amountAtomic = parseAtomicBigInt((bal as any)?.amount);
+            if (amountAtomic === null) return;
+            const ata = String((bal as any)?.ata || '').trim() || null;
+            out.usdtAvailableAtomic = amountAtomic;
+            setWalletUsdtAta(ata);
+            setWalletUsdtAtomic(amountAtomic.toString());
+            setWalletUsdtErr(null);
+            setPreflight((prev: any) =>
+              prev && typeof prev === 'object'
+                ? {
+                    ...prev,
+                    sol_usdt: {
+                      ...(prev?.sol_usdt && typeof prev.sol_usdt === 'object' ? prev.sol_usdt : {}),
+                      ata,
+                      amount: amountAtomic.toString(),
+                    },
+                  }
+                : prev
+            );
+          } catch (_e) {}
+        })()
+      );
+    }
+
+    if (tasks.length > 0) await Promise.all(tasks);
+    return out;
   }
 
   function adoptOfferIntoRfqDraft(offerEvt: any) {
@@ -2415,15 +2541,24 @@ function App() {
 	    const lines = Array.isArray(offerLines) ? offerLines : [];
 	    if (lines.length < 1) return void pushToast('error', 'Offer must include at least 1 line');
 	    if (lines.length > 20) return void pushToast('error', 'Offer has too many lines (max 20)');
-	    for (let i = 0; i < lines.length; i += 1) {
-	      const l = lines[i];
-	      const btc = Number((l as any)?.btc_sats);
-	      const usdt = String((l as any)?.usdt_amount || '').trim();
-	      if (!Number.isInteger(btc) || btc < 1) return void pushToast('error', `Offer line ${i + 1}: BTC must be >= 1 sat`);
-	      if (!/^[0-9]+$/.test(usdt)) return void pushToast('error', `Offer line ${i + 1}: USDT must be a base-unit integer`);
+    for (let i = 0; i < lines.length; i += 1) {
+      const l = lines[i];
+      const btc = Number((l as any)?.btc_sats);
+      const usdt = String((l as any)?.usdt_amount || '').trim();
+      if (!Number.isInteger(btc) || btc < 1) return void pushToast('error', `Offer line ${i + 1}: BTC must be >= 1 sat`);
+      if (!/^[0-9]+$/.test(usdt)) return void pushToast('error', `Offer line ${i + 1}: USDT must be a base-unit integer`);
     }
-    if (!ensureLnLiquidityForLines({ role: 'receive', lines, actionLabel: offerRunAsBot ? 'Start offer bot' : 'Post offer' })) return;
-    if (!ensureOfferFundingForLines({ lines, maxTotalFeeBps: offerMaxTotalFeeBps, actionLabel: offerRunAsBot ? 'Start offer bot' : 'Post offer' })) {
+    const offerActionLabel = offerRunAsBot ? 'Start offer bot' : 'Post offer';
+    const freshSnapshot = await fetchFreshTradeGuardrailSnapshot({ needLn: true, needUsdt: true });
+    if (!ensureLnLiquidityForLines({ role: 'receive', lines, actionLabel: offerActionLabel, lnSummaryOverride: freshSnapshot.lnSummary })) return;
+    if (
+      !ensureOfferFundingForLines({
+        lines,
+        maxTotalFeeBps: offerMaxTotalFeeBps,
+        actionLabel: offerActionLabel,
+        usdtAvailableOverrideAtomic: freshSnapshot.usdtAvailableAtomic,
+      })
+    ) {
       return;
     }
 
@@ -2560,7 +2695,9 @@ function App() {
       if (!Number.isInteger(btc) || btc < 1) return void pushToast('error', `RFQ line ${i + 1}: BTC must be >= 1 sat`);
       if (!/^[0-9]+$/.test(usdt)) return void pushToast('error', `RFQ line ${i + 1}: USDT must be a base-unit integer`);
     }
-    if (!ensureLnLiquidityForLines({ role: 'send', lines, actionLabel: rfqRunAsBot ? 'Start RFQ bot' : 'Post RFQ' })) return;
+    const rfqActionLabel = rfqRunAsBot ? 'Start RFQ bot' : 'Post RFQ';
+    const freshSnapshot = await fetchFreshTradeGuardrailSnapshot({ needLn: true, needUsdt: false });
+    if (!ensureLnLiquidityForLines({ role: 'send', lines, actionLabel: rfqActionLabel, lnSummaryOverride: freshSnapshot.lnSummary })) return;
     if (!Number.isFinite(solLamportsAvailable as any) || Number(solLamportsAvailable) < SOL_TX_FEE_BUFFER_LAMPORTS) {
       return void pushToast(
         'error',
@@ -2800,6 +2937,7 @@ function App() {
   }
 
   const preflightBusyRef = useRef(false);
+  const preflightRunSeqRef = useRef(0);
   useEffect(() => {
     preflightBusyRef.current = preflightBusy;
   }, [preflightBusy]);
@@ -3030,6 +3168,11 @@ function App() {
   }
 
   async function refreshPreflight(opts: { includeTradeAuto?: boolean } = {}) {
+    // Single-flight guard: prevents overlapping checklist polls from piling up under load.
+    if (preflightBusyRef.current) return;
+    preflightBusyRef.current = true;
+    const runSeq = preflightRunSeqRef.current + 1;
+    preflightRunSeqRef.current = runSeq;
     setPreflightBusy(true);
     const out: any = { ts: Date.now() };
     const includeTradeAuto = opts.includeTradeAuto ?? tradeAutoTraceEnabled;
@@ -3156,8 +3299,9 @@ function App() {
       out.receipts_error = e?.message || String(e);
     }
 
-    setPreflight(out);
-    setPreflightBusy(false);
+    if (preflightRunSeqRef.current === runSeq) setPreflight(out);
+    if (preflightRunSeqRef.current === runSeq) setPreflightBusy(false);
+    if (preflightRunSeqRef.current === runSeq) preflightBusyRef.current = false;
   }
 
   async function refreshEnv() {
@@ -3420,6 +3564,7 @@ function App() {
 
   function appendScEvent(evt: any, { persist = true } = {}) {
     const e = evt && typeof evt === 'object' ? evt : { type: 'event', evt };
+    if (!shouldKeepScEventInUi(e)) return;
     const msgTs = e?.message && typeof e.message.ts === 'number' ? e.message.ts : null;
     const ts = typeof e.ts === 'number' ? e.ts : msgTs !== null ? msgTs : Date.now();
     const normalized = { ...e, ts };
@@ -3434,6 +3579,9 @@ function App() {
     }
 
     scPendingUiEventsRef.current.push(normalized);
+    if (scPendingUiEventsRef.current.length > scEventsMax * 2) {
+      scPendingUiEventsRef.current.splice(0, scPendingUiEventsRef.current.length - scEventsMax * 2);
+    }
     scheduleScUiFlush();
 
     if (persist && normalized.type === 'sc_event') {
