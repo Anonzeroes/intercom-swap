@@ -1333,6 +1333,32 @@ function App() {
     return byTrade;
   }, [scEvents]);
 
+  const swapLocalRoleHints = useMemo(() => {
+    const byTrade = new Map<string, { rfqLocal: boolean; quoteAcceptLocal: boolean; quoteLocal: boolean }>();
+    const mark = (tradeId: string, fn: (row: { rfqLocal: boolean; quoteAcceptLocal: boolean; quoteLocal: boolean }) => void) => {
+      if (!tradeId) return;
+      let row = byTrade.get(tradeId);
+      if (!row) {
+        row = { rfqLocal: false, quoteAcceptLocal: false, quoteLocal: false };
+        byTrade.set(tradeId, row);
+      }
+      fn(row);
+    };
+    for (const e of scEvents) {
+      try {
+        const tradeId = String((e as any)?.trade_id || (e as any)?.message?.trade_id || '').trim();
+        if (!tradeId) continue;
+        const kind = String((e as any)?.kind || (e as any)?.message?.kind || '').trim();
+        const isLocal = Boolean((e as any)?.local) || String((e as any)?.dir || '').trim().toLowerCase() === 'out';
+        if (!isLocal) continue;
+        if (kind === 'swap.rfq') mark(tradeId, (r) => (r.rfqLocal = true));
+        else if (kind === 'swap.quote_accept') mark(tradeId, (r) => (r.quoteAcceptLocal = true));
+        else if (kind === 'swap.quote') mark(tradeId, (r) => (r.quoteLocal = true));
+      } catch (_e) {}
+    }
+    return byTrade;
+  }, [scEvents]);
+
   const autoAcceptedQuoteSigRef = useRef<Set<string>>(new Set());
   const autoAcceptedTradeIdRef = useRef<Set<string>>(new Set());
   const autoRfqFromOfferLineRef = useRef<Set<string>>(new Set());
@@ -1818,7 +1844,12 @@ function App() {
           const msg = (e as any)?.message;
           const sig = String(msg?.sig || '').trim().toLowerCase();
           if (!sig || autoJoinedInviteSigRef.current.has(sig)) continue;
-          if (Boolean((e as any)?._invite_joined)) continue;
+          const swapCh = String(msg?.body?.swap_channel || '').trim();
+          if (Boolean((e as any)?._invite_joined)) {
+            // If we're already joined (e.g. after reload), still ensure the stream watches this channel.
+            if (swapCh && !watchedChannelsSet.has(swapCh)) watchChannel(swapCh);
+            continue;
+          }
           if (Boolean((e as any)?._invite_expired) || Boolean((e as any)?._invite_done)) continue;
 
           const inviteObj = (msg?.body?.invite || null) as any;
@@ -1837,7 +1868,6 @@ function App() {
 
           autoJoinedInviteSigRef.current.add(sig);
           await runToolFinal('intercomswap_join_from_swap_invite', { swap_invite_envelope: msg }, { auto_approve: true });
-          const swapCh = String(msg?.body?.swap_channel || '').trim();
           if (swapCh) watchChannel(swapCh);
           const tradeId = String(msg?.trade_id || '').trim();
           if (tradeId) dismissInviteTrade(tradeId);
@@ -1857,9 +1887,11 @@ function App() {
   useEffect(() => {
     if (!health?.ok) return;
     if (lnWalletLocked) return;
-    if (!autoAcceptQuotes || !autoInviteFromAccepts || !autoJoinSwapInvites) return;
+    // Settlement automation should not hard-stop due unrelated toggle combinations.
+    // As long as at least one swap automation path is enabled, continue post-invite progression.
+    if (!autoAcceptQuotes && !autoInviteFromAccepts && !autoJoinSwapInvites) return;
     const localPeer = String(localPeerPubkeyHex || '').trim().toLowerCase();
-    if (!/^[0-9a-f]{64}$/i.test(localPeer)) return;
+    const localPeerOk = /^[0-9a-f]{64}$/i.test(localPeer);
 
     const envelopeSigner = (env: any) => {
       try {
@@ -1918,12 +1950,34 @@ function App() {
 
           const makerSigner = envelopeSigner(termsEnv) || envelopeSigner(quoteEnv);
           const takerSigner = envelopeSigner(acceptEnv) || envelopeSigner(quoteAcceptEnv) || envelopeSigner(rfqEnv);
-          const iAmMaker = makerSigner ? makerSigner === localPeer : false;
-          const iAmTaker = takerSigner ? takerSigner === localPeer : false;
+          const localHint = swapLocalRoleHints.get(tradeId) || null;
+          const iOwnRfqTrade = myRfqTradeIds.has(tradeId) || Boolean(localHint?.rfqLocal);
+          const iAmMaker = localPeerOk && makerSigner ? makerSigner === localPeer : false;
+          const iAmTaker =
+            iOwnRfqTrade ||
+            Boolean(localHint?.quoteAcceptLocal) ||
+            (localPeerOk && takerSigner ? takerSigner === localPeer : false);
           if (!iAmMaker && !iAmTaker) continue;
 
           const swapChannel = String(tradeCtx?.channel || neg?.swap_channel || `swap:${tradeId}`).trim();
           if (!swapChannel.startsWith('swap:')) continue;
+          const termsBody = termsEnv?.body && typeof termsEnv.body === 'object' ? termsEnv.body : {};
+          const localSolSigner = String((preflight as any)?.sol_signer?.pubkey || '').trim();
+          const termsLnPayerPeer = String(termsBody?.ln_payer_peer || '').trim().toLowerCase();
+          const termsSolRecipient = String(termsBody?.sol_recipient || '').trim();
+
+          const termsBoundToLocalIdentity = (() => {
+            if (!termsEnv) return true;
+            if (!localPeerOk) return false;
+            if (!/^[0-9a-f]{64}$/i.test(termsLnPayerPeer)) return false;
+            if (termsLnPayerPeer !== localPeer) return false;
+            return true;
+          })();
+          const termsBoundToLocalSolRecipient = (() => {
+            if (!termsEnv) return true;
+            if (!localSolSigner) return false;
+            return Boolean(termsSolRecipient && termsSolRecipient === localSolSigner);
+          })();
 
           // Stage 1 (maker): publish terms from quote + RFQ + quote_accept.
           if (iAmMaker && !termsEnv && quoteEnv && rfqEnv && quoteAcceptEnv) {
@@ -1983,6 +2037,8 @@ function App() {
             if (canRunAutoSwapStage(stageKey)) {
               markAutoSwapStageInFlight(stageKey);
               try {
+                if (!termsBoundToLocalIdentity) throw new Error('auto terms-accept: terms.ln_payer_peer does not match local peer');
+                if (!termsBoundToLocalSolRecipient) throw new Error('auto terms-accept: terms.sol_recipient does not match local Solana signer');
                 await runToolFinal(
                   'intercomswap_terms_accept_from_terms',
                   { channel: swapChannel, terms_envelope: termsEnv },
@@ -2082,6 +2138,8 @@ function App() {
             if (canRunAutoSwapStage(stageKey)) {
               markAutoSwapStageInFlight(stageKey);
               try {
+                if (!termsBoundToLocalIdentity) throw new Error('auto ln_pay: terms.ln_payer_peer does not match local peer');
+                if (!termsBoundToLocalSolRecipient) throw new Error('auto ln_pay: terms.sol_recipient does not match local Solana signer');
                 const out = await runToolFinal(
                   'intercomswap_swap_ln_pay_and_post_verified',
                   {
@@ -2112,7 +2170,7 @@ function App() {
             if (canRunAutoSwapStage(stageKey)) {
               markAutoSwapStageInFlight(stageKey);
               try {
-                const termsBody = termsEnv?.body && typeof termsEnv.body === 'object' ? termsEnv.body : {};
+                if (!termsBoundToLocalSolRecipient) throw new Error('auto sol_claim: terms.sol_recipient does not match local Solana signer');
                 const mint = String(termsBody?.sol_mint || walletUsdtMint || '').trim();
                 if (!mint) throw new Error('auto sol_claim: missing mint');
 
@@ -2160,6 +2218,8 @@ function App() {
     autoInviteFromAccepts,
     autoJoinSwapInvites,
     localPeerPubkeyHex,
+    myRfqTradeIds,
+    swapLocalRoleHints,
     swapTradeContexts,
     swapNegotiationByTrade,
     walletUsdtMint,
@@ -6255,14 +6315,15 @@ function App() {
 	                  <InviteRow
 	                    evt={e}
 	                    onSelect={() => setSelected({ type: 'invite', evt: e })}
-	                    onJoin={() => {
+                    onJoin={() => {
                         if (!joinable) {
                           pushToast('error', joinBlockReason || 'Invite not joinable yet');
                           return;
                         }
                         const swapCh = String((e as any)?.message?.body?.swap_channel || '').trim();
                         if (swapCh && joinedChannelsSet.has(swapCh)) {
-                          pushToast('success', `Already joined ${swapCh}`);
+                          if (swapCh && !watchedChannelsSet.has(swapCh)) watchChannel(swapCh);
+                          pushToast('success', `Already joined ${swapCh}${!watchedChannelsSet.has(swapCh) ? ' (watch enabled)' : ''}`);
                           return;
                         }
                         try {
