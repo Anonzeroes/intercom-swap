@@ -249,6 +249,43 @@ function compareScEventsNewestFirst(a: any, b: any): number {
   return bsq - asq;
 }
 
+function stableKeyStringify(value: any, depth = 0): string {
+  if (depth > 24) return '"[max-depth]"';
+  if (value === null) return 'null';
+  if (value === undefined) return '"[undefined]"';
+  if (Array.isArray(value)) {
+    return `[${value.map((v) => stableKeyStringify(v, depth + 1)).join(',')}]`;
+  }
+  const t = typeof value;
+  if (t === 'string') return JSON.stringify(value);
+  if (t === 'number') return Number.isFinite(value) ? `n:${String(value)}` : '"[non-finite-number]"';
+  if (t === 'boolean') return value ? 'true' : 'false';
+  if (t === 'bigint') return `bi:${value.toString(10)}`;
+  if (t === 'object') {
+    const obj = value as Record<string, any>;
+    const keys = Object.keys(obj).sort((a, b) => a.localeCompare(b));
+    const parts: string[] = [];
+    for (const k of keys) {
+      const v = obj[k];
+      if (v === undefined) continue;
+      parts.push(`${JSON.stringify(k)}:${stableKeyStringify(v, depth + 1)}`);
+    }
+    return `{${parts.join(',')}}`;
+  }
+  return JSON.stringify(String(value));
+}
+
+function listingBodyFingerprint(evt: any): string {
+  try {
+    const msg = evt && typeof evt === 'object' ? (evt as any).message : null;
+    const body = msg && typeof msg === 'object' && msg.body && typeof msg.body === 'object' ? msg.body : null;
+    if (!body) return '';
+    return stableKeyStringify(body);
+  } catch (_e) {
+    return '';
+  }
+}
+
 function listingRepostKey(evt: any): string {
   if (!evt || typeof evt !== 'object') return '';
   const kind = String((evt as any)?.kind || (evt as any)?.message?.kind || '').trim().toLowerCase();
@@ -257,6 +294,8 @@ function listingRepostKey(evt: any): string {
   if (!tradeId) return '';
   const channel = String((evt as any)?.channel || '').trim().toLowerCase();
   const signer = String((evt as any)?.message?.signer || (evt as any)?.from || '').trim().toLowerCase();
+  const bodyFp = listingBodyFingerprint(evt);
+  if (bodyFp) return `${kind}|${channel}|${tradeId}|${signer}|${bodyFp}`;
   return `${kind}|${channel}|${tradeId}|${signer}`;
 }
 
