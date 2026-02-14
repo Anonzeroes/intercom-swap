@@ -2,6 +2,17 @@ function isObject(v) {
   return v && typeof v === 'object' && !Array.isArray(v);
 }
 
+function coerceSafeInt(value) {
+  if (Number.isInteger(value)) return value;
+  if (typeof value !== 'string') return value;
+  const s = value.trim();
+  if (!/^[0-9]+$/.test(s)) return value;
+  // Note: parseInt("") already guarded; keep within safe integer bounds.
+  const n = Number.parseInt(s, 10);
+  if (!Number.isSafeInteger(n)) return value;
+  return n;
+}
+
 function pow10BigInt(n) {
   let out = 1n;
   for (let i = 0; i < n; i += 1) out *= 10n;
@@ -67,10 +78,27 @@ export function repairToolArguments(toolName, args) {
   // Best-effort repair for common model mistakes. Keep this tightly scoped and conservative.
   if (!isObject(args)) return args;
 
+  if (toolName === 'intercomswap_autopost_start') {
+    const out = { ...args };
+    if ('interval_sec' in out) out.interval_sec = coerceSafeInt(out.interval_sec);
+    if ('ttl_sec' in out) out.ttl_sec = coerceSafeInt(out.ttl_sec);
+    if ('valid_until_unix' in out) out.valid_until_unix = coerceSafeInt(out.valid_until_unix);
+    return out;
+  }
+
   // Models often flatten offer fields (have/want/btc_sats/...) at the top-level for offer_post.
   // The schema requires these to live under offers[].
   if (toolName === 'intercomswap_offer_post') {
     const out = { ...args };
+    if ('ttl_sec' in out) out.ttl_sec = coerceSafeInt(out.ttl_sec);
+    if ('valid_until_unix' in out) out.valid_until_unix = coerceSafeInt(out.valid_until_unix);
+
+    // Executor rejects specifying both. Prefer ttl_sec when present (it is less error-prone
+    // than model-generated absolute unix seconds).
+    if (out.ttl_sec !== null && out.ttl_sec !== undefined && out.valid_until_unix !== null && out.valid_until_unix !== undefined) {
+      delete out.valid_until_unix;
+    }
+
     // Some models use "channel" (singular) instead of "channels" (array).
     if (!Array.isArray(out.channels) && typeof out.channel === 'string' && out.channel.trim()) {
       out.channels = [out.channel.trim()];

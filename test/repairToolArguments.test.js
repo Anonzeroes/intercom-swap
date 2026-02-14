@@ -56,6 +56,31 @@ test('repairToolArguments: coerces rfq_post usdt_amount decimal to atomic', () =
   assert.equal(out.usdt_amount, '120000');
 });
 
+test('repairToolArguments: offer_post drops valid_until_unix when ttl_sec is present', () => {
+  const out = repairToolArguments('intercomswap_offer_post', {
+    channels: ['0000intercomswapbtcusdt'],
+    name: 'maker:alice',
+    ttl_sec: 86400,
+    valid_until_unix: 9999999999,
+    offers: [
+      {
+        pair: 'BTC_LN/USDT_SOL',
+        have: 'USDT_SOL',
+        want: 'BTC_LN',
+        btc_sats: 1000,
+        usdt_amount: '120000',
+        max_platform_fee_bps: 10,
+        max_trade_fee_bps: 10,
+        max_total_fee_bps: 20,
+        min_sol_refund_window_sec: 3600,
+        max_sol_refund_window_sec: 7200,
+      },
+    ],
+  });
+  assert.ok('ttl_sec' in out);
+  assert.ok(!('valid_until_unix' in out));
+});
+
 test('repairToolArguments: coerces sol_transfer_sol lamports decimal (SOL units) to atomic lamports', () => {
   const out = repairToolArguments('intercomswap_sol_transfer_sol', {
     to: '11111111111111111111111111111111',
@@ -63,4 +88,3 @@ test('repairToolArguments: coerces sol_transfer_sol lamports decimal (SOL units)
   });
   assert.equal(out.lamports, '10000000');
 });
-
