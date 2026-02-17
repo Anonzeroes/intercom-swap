@@ -1,4 +1,6 @@
 # Intercom Termux Tooling
+![photo_2026-02-17_14-38-14](https://github.com/user-attachments/assets/8850aa7f-bf5d-4c70-a383-a82005db184c)
+
 
 Lightweight **Termux-based utilities** designed to help contributors interact with  
 the **Intercom / Intercom-Swap ecosystem** more easily.
